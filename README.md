@@ -1,0 +1,3 @@
+# PLC-STM-ESP Control
+
+This project focuses on industrial control tests using PLC, STM32 Nucleo and ESP platforms, with Ethernet-based communication in the first development stage.

@@ -262,8 +262,9 @@ static void low_level_init(struct netif *netif)
   hal_eth_init_status = HAL_ETH_Init(&heth);
 
   memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
-  TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
-  TxConfig.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
+
+  TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CRCPAD;
+  TxConfig.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
   TxConfig.CRCPadCtrl = ETH_CRC_PAD_INSERT;
 
   /* End ETH HAL Init */
@@ -410,145 +411,64 @@ static void low_level_init(struct netif *netif)
 
 static err_t low_level_output(struct netif *netif, struct pbuf *p)
 {
-  uint32_t i = 0U;
   struct pbuf *q = NULL;
-  err_t errval = ERR_OK;
+  uint32_t i = 0;
   ETH_BufferTypeDef Txbuffer[ETH_TX_DESC_CNT] = {0};
   ETH_TxPacketConfig tx_config;
   HAL_StatusTypeDef tx_status;
-  char msg[160];
+  char msg[128];
 
-  uint8_t first_buf[128];
-  uint32_t copied = 0;
-
-  memset(first_buf, 0, sizeof(first_buf));
+  (void)netif;
 
   eth_uart_print("TX fonksiyonuna girildi\r\n");
 
-  memset(Txbuffer, 0, ETH_TX_DESC_CNT * sizeof(ETH_BufferTypeDef));
-  memset(&tx_config, 0, sizeof(ETH_TxPacketConfig));
-
-  tx_config.Attributes   = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
-  tx_config.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
-  tx_config.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
+  memset(&tx_config, 0, sizeof(tx_config));
+  memset(Txbuffer, 0, sizeof(Txbuffer));
 
   for (q = p; q != NULL; q = q->next)
   {
     if (i >= ETH_TX_DESC_CNT)
     {
       eth_uart_print("TX: descriptor yetmedi\r\n");
-      return ERR_IF;
+      return ERR_BUF;
     }
 
     Txbuffer[i].buffer = q->payload;
-    Txbuffer[i].len    = q->len;
+    Txbuffer[i].len = q->len;
+    Txbuffer[i].next = NULL;
 
     if (i > 0)
     {
       Txbuffer[i - 1].next = &Txbuffer[i];
     }
 
-    if (q->next == NULL)
-    {
-      Txbuffer[i].next = NULL;
-    }
-
-    /* ilk 128 byte'i debug icin kopyala */
-    if (copied < sizeof(first_buf))
-    {
-      uint32_t remain = sizeof(first_buf) - copied;
-      uint32_t take = (q->len < remain) ? q->len : remain;
-      memcpy(&first_buf[copied], q->payload, take);
-      copied += take;
-    }
-
     i++;
   }
 
-  snprintf(msg, sizeof(msg), "TX toplam uzunluk: %lu\r\n", p->tot_len);
+  tx_config.Attributes   = ETH_TX_PACKETS_FEATURES_CRCPAD;
+  tx_config.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
+  tx_config.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
+  tx_config.Length       = p->tot_len;
+  tx_config.TxBuffer     = Txbuffer;
+  tx_config.pData        = NULL;
+
+  snprintf(msg, sizeof(msg), "TX toplam uzunluk: %lu\r\n", (uint32_t)p->tot_len);
   eth_uart_print(msg);
 
-  /* Paket tipi debug */
-  if (copied >= 14)
+  tx_status = HAL_ETH_Transmit(&heth, &tx_config, 100);
+
+  if (tx_status == HAL_OK)
   {
-    uint16_t eth_type = ((uint16_t)first_buf[12] << 8) | first_buf[13];
-    snprintf(msg, sizeof(msg), "TX ETH TYPE: 0x%04X\r\n", eth_type);
-    eth_uart_print(msg);
-
-    if (eth_type == 0x0806)
-    {
-      eth_uart_print("GIDEN PAKET: ARP\r\n");
-    }
-    else if (eth_type == 0x0800)
-    {
-      eth_uart_print("GIDEN PAKET: IPv4\r\n");
-
-      if (copied >= 24)
-      {
-        uint8_t ip_proto = first_buf[23];
-        snprintf(msg, sizeof(msg), "TX IP PROTO: %u\r\n", ip_proto);
-        eth_uart_print(msg);
-
-        if (ip_proto == 1)
-        {
-          eth_uart_print("BU GIDEN PAKET ICMP\r\n");
-        }
-        else if (ip_proto == 6)
-        {
-          eth_uart_print("BU GIDEN PAKET TCP\r\n");
-        }
-        else if (ip_proto == 17)
-        {
-          eth_uart_print("BU GIDEN PAKET UDP\r\n");
-        }
-      }
-    }
-    else
-    {
-      eth_uart_print("GIDEN PAKET: DIGER\r\n");
-    }
+    eth_uart_print("TX: HAL_OK\r\n");
+    return ERR_OK;
   }
-
-  tx_config.Length   = p->tot_len;
-  tx_config.TxBuffer = Txbuffer;
-  tx_config.pData    = p;
-
-  pbuf_ref(p);
-
-  do
+  else
   {
-    tx_status = HAL_ETH_Transmit_IT(&heth, &tx_config);
-
-    if (tx_status == HAL_OK)
-    {
-      eth_uart_print("TX: HAL_OK\r\n");
-      errval = ERR_OK;
-    }
-    else
-    {
-      uint32_t hal_err = HAL_ETH_GetError(&heth);
-
-      snprintf(msg, sizeof(msg), "TX: HAL_ETH_Transmit_IT hata, HAL err = 0x%08lX\r\n", hal_err);
-      eth_uart_print(msg);
-
-      if (hal_err & HAL_ETH_ERROR_BUSY)
-      {
-        eth_uart_print("TX: BUSY, semaphore bekleniyor\r\n");
-        osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT);
-        HAL_ETH_ReleaseTxPacket(&heth);
-        eth_uart_print("TX: packet release yapildi\r\n");
-        errval = ERR_BUF;
-      }
-      else
-      {
-        eth_uart_print("TX: DIGER HATA\r\n");
-        pbuf_free(p);
-        errval = ERR_IF;
-      }
-    }
-  } while (errval == ERR_BUF);
-
-  return errval;
+    uint32_t hal_err = HAL_ETH_GetError(&heth);
+    snprintf(msg, sizeof(msg), "TX HATA: 0x%08lX\r\n", hal_err);
+    eth_uart_print(msg);
+    return ERR_IF;
+  }
 }
 
 /**
@@ -825,14 +745,14 @@ void HAL_ETH_MspInit(ETH_HandleTypeDef* ethHandle)
     GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13;
+    GPIO_InitStruct.Pin = GPIO_PIN_13;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_11;
+    GPIO_InitStruct.Pin = GPIO_PIN_11 | GPIO_PIN_13;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
@@ -875,9 +795,9 @@ void HAL_ETH_MspDeInit(ETH_HandleTypeDef* ethHandle)
 
     HAL_GPIO_DeInit(GPIOA, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_7);
 
-    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_12|GPIO_PIN_13);
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_13);
 
-    HAL_GPIO_DeInit(GPIOG, GPIO_PIN_11);
+    HAL_GPIO_DeInit(GPIOG, GPIO_PIN_11 | GPIO_PIN_13);
 
     /* Peripheral interrupt Deinit*/
     HAL_NVIC_DisableIRQ(ETH_IRQn);

@@ -47,9 +47,10 @@ _Min_Stack_Size = 0x400; /* required amount of stack */
 MEMORY
 {
   ITCMRAM    (xrw)    : ORIGIN = 0x00000000,   LENGTH = 64K
-  RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 128K
-  RAM_D1    (xrw)    : ORIGIN = 0x24000000,   LENGTH = 512K
-  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 1024K
+  RAM        (xrw)    : ORIGIN = 0x20000000,   LENGTH = 128K
+  RAM_D1     (xrw)    : ORIGIN = 0x24000000,   LENGTH = 512K
+  RAM_D2     (xrw)    : ORIGIN = 0x30000000,   LENGTH = 288K
+  FLASH      (rx)     : ORIGIN = 0x8000000,    LENGTH = 1024K
 }
 
 /* Sections */
@@ -168,6 +169,33 @@ SECTIONS
     _ebss = .;         /* define a global symbol at bss end */
     __bss_end__ = _ebss;
   } >RAM_D1
+   .RxDescripSection (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.RxDescripSection)
+    . = ALIGN(32);
+  } >RAM_D2
+
+  .TxDescripSection (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.TxDescripSection)
+    . = ALIGN(32);
+  } >RAM_D2
+
+  .Rx_PoolSection (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.Rx_PoolSection)
+    . = ALIGN(32);
+  } >RAM_D2 
+  
+    .Tx_BuffSection (NOLOAD) :
+  {
+    . = ALIGN(32);
+    *(.Tx_BuffSection)
+    . = ALIGN(32);
+  } >RAM_D2
 
   /* User_heap_stack section, used to check that there is enough "RAM_D1" Ram  type memory left */
   ._user_heap_stack :

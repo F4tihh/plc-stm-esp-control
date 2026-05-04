@@ -154,6 +154,7 @@ osSemaphoreId_t TxPktSemaphore = NULL;   /* Semaphore to signal transmit packet 
 /* Global Ethernet handle */
 ETH_HandleTypeDef heth;
 ETH_TxPacketConfig TxConfig;
+
 /* Private function prototypes -----------------------------------------------*/
 int32_t ETH_PHY_IO_Init(void);
 int32_t ETH_PHY_IO_DeInit (void);
@@ -182,8 +183,6 @@ void pbuf_free_custom(struct pbuf *p);
   */
 void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
 {
-
-	eth_rx_irq_count++;
   osSemaphoreRelease(RxPktSemaphore);
 }
 /**
@@ -193,7 +192,6 @@ void HAL_ETH_RxCpltCallback(ETH_HandleTypeDef *handlerEth)
   */
 void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
 {
-	eth_tx_irq_count++;
   osSemaphoreRelease(TxPktSemaphore);
 }
 /**
@@ -203,14 +201,7 @@ void HAL_ETH_TxCpltCallback(ETH_HandleTypeDef *handlerEth)
   */
 void HAL_ETH_ErrorCallback(ETH_HandleTypeDef *handlerEth)
 {
-  eth_err_irq_count++;
-
-  uint32_t dma_err = HAL_ETH_GetDMAError(handlerEth);
-  char msg[64];
-  snprintf(msg, sizeof(msg), "DMA ERR: 0x%08lX\r\n", dma_err);
-  eth_uart_print(msg);
-
-  if((dma_err & ETH_DMACSR_RBU) == ETH_DMACSR_RBU)
+  if((HAL_ETH_GetDMAError(handlerEth) & ETH_DMACSR_RBU) == ETH_DMACSR_RBU)
   {
      osSemaphoreRelease(RxPktSemaphore);
   }
@@ -243,12 +234,12 @@ static void low_level_init(struct netif *netif)
 
    uint8_t MACAddr[6] ;
   heth.Instance = ETH;
-  MACAddr[0] = 0x02;
-  MACAddr[1] = 0x12;
-  MACAddr[2] = 0x34;
-  MACAddr[3] = 0x56;
-  MACAddr[4] = 0x78;
-  MACAddr[5] = 0x9A;
+  MACAddr[0] = 0x00;
+  MACAddr[1] = 0x80;
+  MACAddr[2] = 0xE1;
+  MACAddr[3] = 0x00;
+  MACAddr[4] = 0x00;
+  MACAddr[5] = 0x00;
   heth.Init.MACAddr = &MACAddr[0];
   heth.Init.MediaInterface = HAL_ETH_RMII_MODE;
   heth.Init.TxDesc = DMATxDscrTab;
@@ -262,9 +253,8 @@ static void low_level_init(struct netif *netif)
   hal_eth_init_status = HAL_ETH_Init(&heth);
 
   memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
-
-  TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CRCPAD;
-  TxConfig.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
+  TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
+  TxConfig.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
   TxConfig.CRCPadCtrl = ETH_CRC_PAD_INSERT;
 
   /* End ETH HAL Init */
@@ -324,12 +314,6 @@ static void low_level_init(struct netif *netif)
     netif_set_down(netif);
     return;
   }
-
-  memset(&attributes, 0x0, sizeof(osThreadAttr_t));
-  attributes.name = "EthLink";
-  attributes.stack_size = INTERFACE_THREAD_STACK_SIZE;
-  attributes.priority = osPriorityBelowNormal;
-  osThreadNew(ethernet_link_thread, netif, &attributes);
 
   if (hal_eth_init_status == HAL_OK)
   {
@@ -411,64 +395,73 @@ static void low_level_init(struct netif *netif)
 
 static err_t low_level_output(struct netif *netif, struct pbuf *p)
 {
+  uint32_t i = 0U;
   struct pbuf *q = NULL;
-  uint32_t i = 0;
+  err_t errval = ERR_OK;
   ETH_BufferTypeDef Txbuffer[ETH_TX_DESC_CNT] = {0};
   ETH_TxPacketConfig tx_config;
-  HAL_StatusTypeDef tx_status;
-  char msg[128];
 
-  (void)netif;
+  memset(Txbuffer, 0 , ETH_TX_DESC_CNT*sizeof(ETH_BufferTypeDef));
 
-  eth_uart_print("TX fonksiyonuna girildi\r\n");
+  /* Set Tx packet config common parameters */
+  memset(&tx_config, 0 , sizeof(ETH_TxPacketConfig));
+  tx_config.Attributes = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
+  tx_config.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
+  tx_config.CRCPadCtrl = ETH_CRC_PAD_INSERT;
 
-  memset(&tx_config, 0, sizeof(tx_config));
-  memset(Txbuffer, 0, sizeof(Txbuffer));
-
-  for (q = p; q != NULL; q = q->next)
+  for(q = p; q != NULL; q = q->next)
   {
-    if (i >= ETH_TX_DESC_CNT)
-    {
-      eth_uart_print("TX: descriptor yetmedi\r\n");
-      return ERR_BUF;
-    }
+    if(i >= ETH_TX_DESC_CNT)
+      return ERR_IF;
 
     Txbuffer[i].buffer = q->payload;
     Txbuffer[i].len = q->len;
-    Txbuffer[i].next = NULL;
 
-    if (i > 0)
+    if(i>0)
     {
-      Txbuffer[i - 1].next = &Txbuffer[i];
+      Txbuffer[i-1].next = &Txbuffer[i];
+    }
+
+    if(q->next == NULL)
+    {
+      Txbuffer[i].next = NULL;
     }
 
     i++;
   }
 
-  tx_config.Attributes   = ETH_TX_PACKETS_FEATURES_CRCPAD;
-  tx_config.ChecksumCtrl = ETH_CHECKSUM_DISABLE;
-  tx_config.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
-  tx_config.Length       = p->tot_len;
-  tx_config.TxBuffer     = Txbuffer;
-  tx_config.pData        = NULL;
+  tx_config.Length = p->tot_len;
+  tx_config.TxBuffer = Txbuffer;
+  tx_config.pData = p;
 
-  snprintf(msg, sizeof(msg), "TX toplam uzunluk: %lu\r\n", (uint32_t)p->tot_len);
-  eth_uart_print(msg);
+  pbuf_ref(p);
 
-  tx_status = HAL_ETH_Transmit(&heth, &tx_config, 100);
-
-  if (tx_status == HAL_OK)
+  do
   {
-    eth_uart_print("TX: HAL_OK\r\n");
-    return ERR_OK;
-  }
-  else
-  {
-    uint32_t hal_err = HAL_ETH_GetError(&heth);
-    snprintf(msg, sizeof(msg), "TX HATA: 0x%08lX\r\n", hal_err);
-    eth_uart_print(msg);
-    return ERR_IF;
-  }
+    if(HAL_ETH_Transmit_IT(&heth, &tx_config) == HAL_OK)
+    {
+      errval = ERR_OK;
+    }
+    else
+    {
+
+      if(HAL_ETH_GetError(&heth) & HAL_ETH_ERROR_BUSY)
+      {
+        /* Wait for descriptors to become available */
+        osSemaphoreAcquire(TxPktSemaphore, ETHIF_TX_TIMEOUT);
+        HAL_ETH_ReleaseTxPacket(&heth);
+        errval = ERR_BUF;
+      }
+      else
+      {
+        /* Other error */
+        pbuf_free(p);
+        errval =  ERR_IF;
+      }
+    }
+  }while(errval == ERR_BUF);
+
+  return errval;
 }
 
 /**
@@ -504,81 +497,22 @@ void ethernetif_input(void* argument)
 {
   struct pbuf *p = NULL;
   struct netif *netif = (struct netif *) argument;
-  char msg[128];
 
   for( ;; )
   {
     if (osSemaphoreAcquire(RxPktSemaphore, TIME_WAITING_FOR_INPUT) == osOK)
     {
-      eth_uart_print("RX semaphore geldi\r\n");
-
       do
       {
-        p = low_level_input(netif);
-
+        p = low_level_input( netif );
         if (p != NULL)
         {
-          uint8_t *d = (uint8_t *)p->payload;
-          uint16_t eth_type = 0;
-
-          eth_uart_print("PBUF alindi\r\n");
-          eth_pbuf_count++;
-
-          if (p->len >= 14)
+          if (netif->input( p, netif) != ERR_OK )
           {
-            eth_type = ((uint16_t)d[12] << 8) | d[13];
-
-            snprintf(msg, sizeof(msg), "ETH TYPE: 0x%04X  LEN: %u\r\n", eth_type, (unsigned)p->tot_len);
-            eth_uart_print(msg);
-
-            if (eth_type == 0x0806)
-            {
-              eth_uart_print("GELEN PAKET: ARP\r\n");
-            }
-            else if (eth_type == 0x0800)
-            {
-              eth_uart_print("GELEN PAKET: IPv4\r\n");
-
-              if (p->len >= 24)
-              {
-                uint8_t ip_proto = d[23];
-                snprintf(msg, sizeof(msg), "IP PROTO: %u\r\n", ip_proto);
-                eth_uart_print(msg);
-
-                if (ip_proto == 1)
-                {
-                  eth_uart_print("BU PAKET ICMP\r\n");
-                }
-                else if (ip_proto == 6)
-                {
-                  eth_uart_print("BU PAKET TCP\r\n");
-                }
-                else if (ip_proto == 17)
-                {
-                  eth_uart_print("BU PAKET UDP\r\n");
-                }
-              }
-            }
-            else
-            {
-              eth_uart_print("GELEN PAKET: DIGER\r\n");
-            }
-          }
-
-          if (netif->input(p, netif) != ERR_OK)
-          {
-            eth_uart_print("netif->input FAIL\r\n");
-            eth_input_fail_count++;
             pbuf_free(p);
           }
-          else
-          {
-            eth_uart_print("netif->input OK\r\n");
-            eth_input_ok_count++;
-          }
         }
-
-      } while (p != NULL);
+      } while(p!=NULL);
     }
   }
 }

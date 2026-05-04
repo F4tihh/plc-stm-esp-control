@@ -22,17 +22,6 @@
 #include "stm32h7xx_it.h"
 #include "FreeRTOS.h"
 #include "task.h"
-
-#include <stdio.h>
-#include <string.h>
-
-
-extern UART_HandleTypeDef huart3;
-
-static void hf_uart(const char *msg)
-{
-  HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
-}
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
@@ -96,24 +85,13 @@ void NMI_Handler(void)
   */
 void HardFault_Handler(void)
 {
-  char msg[128];
+  /* USER CODE BEGIN HardFault_IRQn 0 */
 
-  hf_uart("\r\n*** HARDFAULT OLUSTU ***\r\n");
-
-  snprintf(msg, sizeof(msg), "HFSR = 0x%08lX\r\n", SCB->HFSR);
-  hf_uart(msg);
-
-  snprintf(msg, sizeof(msg), "CFSR = 0x%08lX\r\n", SCB->CFSR);
-  hf_uart(msg);
-
-  snprintf(msg, sizeof(msg), "MMFAR = 0x%08lX\r\n", SCB->MMFAR);
-  hf_uart(msg);
-
-  snprintf(msg, sizeof(msg), "BFAR = 0x%08lX\r\n", SCB->BFAR);
-  hf_uart(msg);
-
+  /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
+    /* USER CODE BEGIN W1_HardFault_IRQn 0 */
+    /* USER CODE END W1_HardFault_IRQn 0 */
   }
 }
 

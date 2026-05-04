@@ -7,6 +7,7 @@
   */
 /* USER CODE END Header */
 
+/* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "FreeRTOS.h"
 #include "cmsis_os2.h"
@@ -36,6 +37,11 @@ extern lan8742_Object_t LAN8742;
 extern struct netif gnetif;
 /* USER CODE END Includes */
 
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 /* #define DUAL_CORE_BOOT_SYNC_SEQUENCE */
 
@@ -64,8 +70,15 @@ extern struct netif gnetif;
 #endif
 /* USER CODE END PD */
 
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 
+/* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
@@ -73,10 +86,18 @@ const osThreadAttr_t defaultTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* USER CODE BEGIN PV */
+static uint8_t esp_rx_byte;
+static char esp_cmd_buffer[32];
+static uint8_t esp_cmd_index = 0;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_USART2_UART_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
@@ -90,6 +111,11 @@ void modbus_motion_test_once(void);
 void uart_send_text(const char *text)
 {
   HAL_UART_Transmit(&huart3, (uint8_t *)text, strlen(text), HAL_MAX_DELAY);
+}
+
+static void esp_send_text(const char *text)
+{
+  HAL_UART_Transmit(&huart2, (uint8_t *)text, strlen(text), HAL_MAX_DELAY);
 }
 
 static void CPU_CACHE_Enable(void)
@@ -248,27 +274,144 @@ void modbus_motion_test_once(void)
   plc_start();
   osDelay(500);
 
-  uart_send_text("ILERI/SARMA: 5 saniye\r\n");
-  plc_set_speed_torque(200, 30);
-  osDelay(5000);
-
-  uart_send_text("DUR: 2 saniye\r\n");
-  plc_set_speed_torque(0, 0);
-  osDelay(2000);
-
-  uart_send_text("GERI TEST: 5 saniye\r\n");
+  uart_send_text("GERI/SARMA TEST: 5+ saniye\r\n");
 
   /*
-    Negatif hiz yerine pozitif hiz deniyoruz.
-    Cunku PLC ladder negatif hizi kabul etmiyor veya hemen sifirliyor olabilir.
+    Su an sistemde calisan yon bu.
+    ESP'den gelen REWIND komutunda da bunu kullanacagiz.
   */
-  plc_set_speed_torque(200, 30);
-  osDelay(5000);
+  plc_set_speed_torque(1000, 100);
+  osDelay(7000);
 
   uart_send_text("FINAL STOP\r\n");
   plc_stop();
 
   uart_send_text("===== MOTION TEST BITTI =====\r\n\r\n");
+}
+
+static void plc_rewind_from_esp(void)
+{
+  uart_send_text("\r\nESP KOMUT GELDI -> HMI REWIND\r\n");
+
+  // 1) Önce sistemi durdur
+  modbus_write_single_coil(3, 0);   // SISTEM_STARTLI = 0
+  osDelay(100);
+  modbus_write_single_coil(2, 0);   // EKRAN_START = 0
+  osDelay(300);
+
+  // 2) Metre / işlem sıfırlama
+  // GMSuite: Metre_sifirlama Modbus adresi 7 görünüyordu.
+  // Gerçek coil adresi = 7 - 1 = 6
+  uart_send_text("METRE SIFIRLAMA\r\n");
+  modbus_write_single_coil(6, 1);
+  osDelay(300);
+  modbus_write_single_coil(6, 0);
+  osDelay(300);
+
+  // 3) İşlem bitti reset denemesi
+  // ISLEM_BITTI Modbus adresi 11 görünüyordu → gerçek coil 10
+  modbus_write_single_coil(10, 0);
+  osDelay(100);
+
+  // 4) Reçete seçimi
+  modbus_write_single_register(42001 - 40001, 1);   // R_SAYAC = 1
+  osDelay(100);
+
+  // 5) Değişken mod aktif
+  modbus_write_single_coil(7, 1);   // EKRAN_DEGISKEN_MOD = 1
+  osDelay(100);
+
+  // 6) Mesafeyi büyük ver
+  modbus_write_single_register(40311 - 40001, 50000); // SERVO_MESAFE
+  osDelay(300);
+
+  // 7) Start
+  modbus_write_single_coil(2, 1);   // EKRAN_START = 1
+  osDelay(100);
+  modbus_write_single_coil(3, 1);   // SISTEM_STARTLI = 1
+
+  osDelay(9000);
+
+  // 8) Stop
+  modbus_write_single_coil(3, 0);
+  osDelay(100);
+  modbus_write_single_coil(2, 0);
+  osDelay(100);
+  modbus_write_single_coil(7, 0);
+
+  uart_send_text("HMI REWIND TAMAMLANDI\r\n\r\n");
+}
+
+static void esp_check_uart_command(void)
+{
+	while (HAL_UART_Receive(&huart2, &esp_rx_byte, 1, 20) == HAL_OK)  {
+	    //  DEBUG EKLEDİĞİM yer
+	    char dbg[32];
+	    snprintf(dbg, sizeof(dbg), "UART2 BYTE: %c\r\n", esp_rx_byte);
+	    uart_send_text(dbg);
+
+	    if (esp_rx_byte == 'R')
+	    {
+	      uart_send_text("ESP KOMUT GELDI -> R / REWIND\r\n");
+	      plc_rewind_from_esp();
+	      memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
+	      esp_cmd_index = 0;
+	      return;
+	    }
+	    if (esp_rx_byte == 'S')
+	    {
+	      uart_send_text("ESP KOMUT GELDI -> S / STOP\r\n");
+	      plc_stop();
+	      memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
+	      esp_cmd_index = 0;
+	      return;
+	    }
+
+
+    if (esp_rx_byte == '\r' || esp_rx_byte == '\n')
+    {
+      esp_cmd_buffer[esp_cmd_index] = '\0';
+
+      if (esp_cmd_index > 0)
+      {
+        if (strcmp(esp_cmd_buffer, "REWIND") == 0)
+        {
+          plc_rewind_from_esp();
+        }
+        else if (strcmp(esp_cmd_buffer, "STOP") == 0)
+        {
+          uart_send_text("ESP KOMUT GELDI -> STOP\r\n");
+          plc_stop();
+          esp_send_text("STM: STOP DONE\r\n");
+        }
+        else if (strcmp(esp_cmd_buffer, "PING") == 0)
+        {
+          uart_send_text("ESP KOMUT GELDI -> PING\r\n");
+          esp_send_text("STM: PONG\r\n");
+        }
+        else
+        {
+          uart_send_text("ESP BILINMEYEN KOMUT\r\n");
+          esp_send_text("STM: UNKNOWN CMD\r\n");
+        }
+      }
+
+      memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
+      esp_cmd_index = 0;
+    }
+    else
+    {
+      if (esp_cmd_index < sizeof(esp_cmd_buffer) - 1)
+      {
+        esp_cmd_buffer[esp_cmd_index++] = (char)esp_rx_byte;
+      }
+      else
+      {
+        memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
+        esp_cmd_index = 0;
+      }
+    }
+  }
 }
 
 void modbus_read_all_registers(void)
@@ -352,6 +495,9 @@ void modbus_read_all_registers(void)
 
 int main(void)
 {
+  /* USER CODE BEGIN 1 */
+  /* USER CODE END 1 */
+
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
   int32_t timeout;
 #endif
@@ -362,35 +508,56 @@ int main(void)
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
   timeout = 0xFFFF;
   while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) != RESET) && (timeout-- > 0));
-  if (timeout < 0) { Error_Handler(); }
+  if (timeout < 0)
+  {
+    Error_Handler();
+  }
 #endif
 
   HAL_Init();
+
   SystemClock_Config();
 
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
   __HAL_RCC_HSEM_CLK_ENABLE();
   HAL_HSEM_FastTake(HSEM_ID_0);
-  HAL_HSEM_Release(HSEM_ID_0, 0);
+  HAL_HSEM_Release(HSEM_ID_0,0);
+
   timeout = 0xFFFF;
   while((__HAL_RCC_GET_FLAG(RCC_FLAG_D2CKRDY) == RESET) && (timeout-- > 0));
-  if (timeout < 0) { Error_Handler(); }
+  if (timeout < 0)
+  {
+    Error_Handler();
+  }
 #endif
 
   MX_GPIO_Init();
   MX_USART3_UART_Init();
+  MX_USART2_UART_Init();
 
+  /* USER CODE BEGIN 2 */
   uart_send_text("\r\n\r\nSTM32 guc verdi\r\n");
+  uart_send_text("USART2 ESP KOMUT HATTI HAZIR\r\n");
+  /* USER CODE END 2 */
 
   osKernelInitialize();
+
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
-  if (defaultTaskHandle == NULL) uart_send_text("TASK CREATE FAIL\r\n");
-  else uart_send_text("TASK CREATE OK\r\n");
+  if (defaultTaskHandle == NULL)
+  {
+    uart_send_text("TASK CREATE FAIL\r\n");
+  }
+  else
+  {
+    uart_send_text("TASK CREATE OK\r\n");
+  }
 
   osKernelStart();
 
-  while (1) {}
+  while (1)
+  {
+  }
 }
 
 void SystemClock_Config(void)
@@ -399,14 +566,19 @@ void SystemClock_Config(void)
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
   HAL_PWREx_ConfigSupply(PWR_DIRECT_SMPS_SUPPLY);
+
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
@@ -415,11 +587,46 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK) Error_Handler();
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_USART2_UART_Init(void)
+{
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 static void MX_USART3_UART_Init(void)
@@ -436,10 +643,22 @@ static void MX_USART3_UART_Init(void)
   huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
   huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
 
-  if (HAL_UART_Init(&huart3) != HAL_OK) Error_Handler();
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart3, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK) Error_Handler();
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart3, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK) Error_Handler();
-  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK) Error_Handler();
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart3, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart3, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 static void MX_GPIO_Init(void)
@@ -457,7 +676,6 @@ void StartDefaultTask(void *argument)
   uint32_t phy_bsr = 0;
   uint8_t link_now = 0;
   uint8_t link_prev = 0xFF;
-  uint8_t motion_done = 0;
 
   uart_send_text("TASK BASLADI\r\n");
   uart_send_text("LWIP init giriyor\r\n");
@@ -475,41 +693,65 @@ void StartDefaultTask(void *argument)
 
   osDelay(3000);
 
-  if (!motion_done)
-  {
-    motion_done = 1;
-    modbus_motion_test_once();
-  }
+  /*
+    Artik otomatik hareket testi yapmiyoruz.
+    ESP32 tarafindan USART2 uzerinden "REWIND\n" gelirse calisacak.
+  */
 
   for(;;)
   {
+    esp_check_uart_command();
+
     if (HAL_ETH_ReadPHYRegister(&heth, 0, 0x01, &phy_bsr) != HAL_OK)
+    {
       uart_send_text("PHY reg read hata\r\n");
+    }
 
     link_now = (phy_bsr & (1 << 2)) ? 1 : 0;
 
     if (link_now != link_prev)
     {
-      if (link_now) uart_send_text("LINK DEGISTI -> UP\r\n");
-      else uart_send_text("LINK DEGISTI -> DOWN\r\n");
+      if (link_now)
+        uart_send_text("LINK DEGISTI -> UP\r\n");
+      else
+        uart_send_text("LINK DEGISTI -> DOWN\r\n");
+
       link_prev = link_now;
     }
 
-    snprintf(msg, sizeof(msg), "PHY BSR (0x01): 0x%04lX\r\n", phy_bsr); uart_send_text(msg);
-    if (link_now) uart_send_text("BSR link bit: 1\r\n"); else uart_send_text("BSR link bit: 0\r\n");
-    if (netif_is_link_up(&gnetif)) uart_send_text("ETH LINK UP\r\n"); else uart_send_text("ETH LINK DOWN\r\n");
-    if (netif_is_up(&gnetif)) uart_send_text("NETIF UP\r\n"); else uart_send_text("NETIF DOWN\r\n");
+    snprintf(msg, sizeof(msg), "PHY BSR (0x01): 0x%04lX\r\n", phy_bsr);
+    uart_send_text(msg);
+
+    if (link_now)
+      uart_send_text("BSR link bit: 1\r\n");
+    else
+      uart_send_text("BSR link bit: 0\r\n");
+
+    if (netif_is_link_up(&gnetif))
+      uart_send_text("ETH LINK UP\r\n");
+    else
+      uart_send_text("ETH LINK DOWN\r\n");
+
+    if (netif_is_up(&gnetif))
+      uart_send_text("NETIF UP\r\n");
+    else
+      uart_send_text("NETIF DOWN\r\n");
 
     snprintf(msg, sizeof(msg), "RX IRQ: %lu  TX IRQ: %lu  ERR IRQ: %lu\r\n",
-             eth_rx_irq_count, eth_tx_irq_count, eth_err_irq_count); uart_send_text(msg);
+             eth_rx_irq_count, eth_tx_irq_count, eth_err_irq_count);
+    uart_send_text(msg);
 
     snprintf(msg, sizeof(msg), "PBUF: %lu  INPUT_OK: %lu  INPUT_FAIL: %lu\r\n",
-             eth_pbuf_count, eth_input_ok_count, eth_input_fail_count); uart_send_text(msg);
+             eth_pbuf_count, eth_input_ok_count, eth_input_fail_count);
+    uart_send_text(msg);
 
-    snprintf(msg, sizeof(msg), "IP: %s\r\n", ip4addr_ntoa(netif_ip4_addr(&gnetif))); uart_send_text(msg);
+    snprintf(msg, sizeof(msg), "IP: %s\r\n", ip4addr_ntoa(netif_ip4_addr(&gnetif)));
+    uart_send_text(msg);
+
     uart_send_text("---------------------\r\n");
 
     modbus_read_all_registers();
+
     osDelay(1000);
   }
 }
@@ -517,6 +759,7 @@ void StartDefaultTask(void *argument)
 void MPU_Config(void)
 {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
+
   HAL_MPU_Disable();
 
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
@@ -532,13 +775,16 @@ void MPU_Config(void)
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
 
 void Error_Handler(void)
 {
   __disable_irq();
-  while (1) {}
+  while (1)
+  {
+  }
 }
 
 #ifdef USE_FULL_ASSERT

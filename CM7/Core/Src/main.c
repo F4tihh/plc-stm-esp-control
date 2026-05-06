@@ -121,6 +121,10 @@ const osThreadAttr_t defaultTask_attributes = {
 };
 
 /* USER CODE BEGIN PV */
+
+static int current_speed = 100;
+static int current_torque = 5;
+
 static uint8_t esp_rx_byte;
 static char esp_cmd_buffer[32];
 static uint8_t esp_cmd_index = 0;
@@ -153,9 +157,66 @@ void plc_reset_meter(void);
 void plc_set_fixed_speed_torque_distance(uint16_t fixed_speed, uint16_t fixed_torque, uint16_t distance);
 void plc_start_fixed_mode_from_esp(void);
 void plc_stop_from_esp(void);
+static int modbus_write_single_register(uint16_t reg_addr,
+                                        uint16_t value);
+
+static int modbus_eth_link_ready(void);
+
 /* USER CODE END PFP */
 
 /* USER CODE BEGIN 0 */
+
+static void plc_apply_live_torque(void)
+{
+  char msg[128];
+
+  snprintf(msg, sizeof(msg),
+           "LIVE TORQUE UPDATE -> TORQUE=%d\r\n",
+           current_torque);
+  uart_send_text(msg);
+
+  if (!modbus_eth_link_ready())
+  {
+    uart_send_text("TORQUE UPDATE FAIL -> ETH/PLC LINK DOWN\r\n");
+    return;
+  }
+
+  if (modbus_write_single_register(HR_EKRAN_SERVO_SABIT_TORK,
+                                   current_torque) == 0)
+  {
+    uart_send_text("TORQUE UPDATE SENT\r\n");
+  }
+  else
+  {
+    uart_send_text("TORQUE UPDATE FAIL\r\n");
+  }
+}
+
+static void plc_apply_live_speed(void)
+{
+  char msg[128];
+
+  snprintf(msg, sizeof(msg),
+           "LIVE SPEED UPDATE -> SPEED=%d\r\n",
+           current_speed);
+  uart_send_text(msg);
+
+  if (!modbus_eth_link_ready())
+  {
+    uart_send_text("SPEED UPDATE FAIL -> ETH/PLC LINK DOWN\r\n");
+    return;
+  }
+
+  if (modbus_write_single_register(HR_EKRAN_SERVO_SABIT_HIZ,
+                                   current_speed) == 0)
+  {
+    uart_send_text("SPEED UPDATE SENT\r\n");
+  }
+  else
+  {
+    uart_send_text("SPEED UPDATE FAIL\r\n");
+  }
+}
 
 void uart_send_text(const char *text)
 {
@@ -240,11 +301,28 @@ static int modbus_open_socket(void)
   }
 
   sock = socket(AF_INET, SOCK_STREAM, 0);
+
   if (sock < 0)
   {
-    modbus_uart_socket_fail_throttled();
-    return -1;
+      modbus_uart_socket_fail_throttled();
+      return -1;
   }
+
+  struct timeval tv_short;
+  tv_short.tv_sec = 1;
+  tv_short.tv_usec = 0;
+
+  setsockopt(sock,
+             SOL_SOCKET,
+             SO_RCVTIMEO,
+             &tv_short,
+             sizeof(tv_short));
+
+  setsockopt(sock,
+             SOL_SOCKET,
+             SO_SNDTIMEO,
+             &tv_short,
+             sizeof(tv_short));
 
   memset(&server, 0, sizeof(server));
   server.sin_family = AF_INET;
@@ -336,12 +414,28 @@ static int modbus_write_single_register(uint16_t reg_addr, uint16_t value)
   }
 
   int len = recv(sock, resp, sizeof(resp), 0);
+
+  if (len <= 0)
+  {
+    uart_send_text("MODBUS WRITE RECV TIMEOUT\r\n");
+
+    (void)closesocket(sock);
+
+    return -1;
+  }
+
   (void)closesocket(sock);
 
   if (len >= 12 && resp[7] == 0x06)
   {
-    snprintf(msg, sizeof(msg), "WRITE REG addr=%u value=%u recv=%d\r\n", reg_addr, value, len);
+    snprintf(msg, sizeof(msg),
+             "WRITE REG addr=%u value=%u recv=%d\r\n",
+             reg_addr,
+             value,
+             len);
+
     uart_send_text(msg);
+
     return 0;
   }
 
@@ -377,12 +471,28 @@ static int modbus_write_single_coil(uint16_t coil_addr, uint8_t state)
   }
 
   int len = recv(sock, resp, sizeof(resp), 0);
+
+  if (len <= 0)
+  {
+    uart_send_text("MODBUS COIL RECV TIMEOUT\r\n");
+
+    (void)closesocket(sock);
+
+    return -1;
+  }
+
   (void)closesocket(sock);
 
   if (len >= 12 && resp[7] == 0x05)
   {
-    snprintf(msg, sizeof(msg), "WRITE COIL addr=%u state=%u recv=%d\r\n", coil_addr, state, len);
+    snprintf(msg, sizeof(msg),
+             "WRITE COIL addr=%u state=%u recv=%d\r\n",
+             coil_addr,
+             state,
+             len);
+
     uart_send_text(msg);
+
     return 0;
   }
 
@@ -501,40 +611,25 @@ void plc_set_fixed_speed_torque_distance(uint16_t fixed_speed, uint16_t fixed_to
 
 void plc_start_fixed_mode_from_esp(void)
 {
-  uart_send_text("\r\nESP KOMUT GELDI -> START (FIXED MODE)\r\n");
 
-  /*
-    Stability-oriented start sequence (requested order):
-    - Clear EKRAN_START=0
-    - Clear SISTEM_STARTLI=0
-    - Clear EKRAN_STOP=0
-    - Set fixed mode + write speed/tork/mesafe
-    - Set EKRAN_START=1
-    - Set SISTEM_STARTLI=1
-  */
+  current_torque = 5;
+  current_speed = 100;
 
-  /* First: clear start/stop/system bits (best-effort, preserves existing Modbus recovery logic) */
-  (void)modbus_write_single_coil(COIL_EKRAN_START, 0);
-  osDelay(80);
-  (void)modbus_write_single_coil(COIL_SISTEM_STARTLI, 0);
-  osDelay(80);
-  (void)modbus_write_single_coil(COIL_EKRAN_STOP, 0);
-  osDelay(100);
+  uart_send_text("\r\nESP KOMUT GELDI -> START\r\n");
 
-  /* Optional: reset meter + clear ISLEM_BITTI (kept from previous behavior) */
-  plc_reset_meter();
-  osDelay(100);
-  (void)modbus_write_single_coil(COIL_ISLEM_BITTI, 0);
-  osDelay(80);
+  modbus_write_single_register(HR_EKRAN_SERVO_SABIT_HIZ, 100);
+  osDelay(200);
 
-  /* Then: fixed mode and parameters */
-  plc_set_fixed_speed_torque_distance(100, 100, 50000);
+  modbus_write_single_register(HR_EKRAN_SERVO_SABIT_TORK, current_torque);
+  osDelay(200);
 
-  /* Finally: start like HMI */
-  (void)modbus_write_single_coil(COIL_EKRAN_START, 1);
-  osDelay(80);
-  (void)modbus_write_single_coil(COIL_SISTEM_STARTLI, 1);
-  uart_send_text("PLC: FIXED MODE START DONE\r\n");
+  modbus_write_single_coil(COIL_EKRAN_START, 1);
+  osDelay(200);
+
+  modbus_write_single_coil(COIL_SISTEM_STARTLI, 1);
+  osDelay(200);
+
+  uart_send_text("PLC START DONE\r\n");
 }
 
 void plc_stop_from_esp(void)
@@ -570,6 +665,62 @@ static void esp_check_uart_command(void)
 
     memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
     esp_cmd_index = 0;
+    return;
+  }
+
+  if (esp_rx_byte == 'A')
+  {
+    current_torque += 5;
+
+    if (current_torque > 50)
+      current_torque = 50;
+
+    uart_send_text("TORQUE PLUS\r\n");
+
+    plc_apply_live_torque();
+
+    return;
+  }
+
+  if (esp_rx_byte == 'Z')
+  {
+    current_torque -= 5;
+
+    if (current_torque < 0)
+      current_torque = 0;
+
+    uart_send_text("TORQUE MINUS\r\n");
+
+    plc_apply_live_torque();
+
+    return;
+  }
+
+  if (esp_rx_byte == 'K')
+  {
+    current_speed += 100;
+
+    if (current_speed > 2000)
+      current_speed = 2000;
+
+    uart_send_text("SPEED PLUS\r\n");
+
+    plc_apply_live_speed();
+
+    return;
+  }
+
+  if (esp_rx_byte == 'M')
+  {
+    current_speed -= 100;
+
+    if (current_speed < 0)
+      current_speed = 0;
+
+    uart_send_text("SPEED MINUS\r\n");
+
+    plc_apply_live_speed();
+
     return;
   }
 

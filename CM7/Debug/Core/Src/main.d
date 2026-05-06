@@ -76,6 +76,7 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os.h \
  ../../Middlewares/Third_Party/LwIP/src/include/lwip/tcpip.h \
  ../../Drivers/BSP/Components/lan8742/lan8742.h \
+ ../../Middlewares/Third_Party/LwIP/src/include/lwip/errno.h \
  ../../Middlewares/Third_Party/LwIP/src/include/lwip/sockets.h \
  ../../Middlewares/Third_Party/LwIP/src/include/lwip/inet.h \
  ../../Middlewares/Third_Party/LwIP/src/include/lwip/errno.h
@@ -158,6 +159,7 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/cmsis_os.h:
 ../../Middlewares/Third_Party/LwIP/src/include/lwip/tcpip.h:
 ../../Drivers/BSP/Components/lan8742/lan8742.h:
+../../Middlewares/Third_Party/LwIP/src/include/lwip/errno.h:
 ../../Middlewares/Third_Party/LwIP/src/include/lwip/sockets.h:
 ../../Middlewares/Third_Party/LwIP/src/include/lwip/inet.h:
 ../../Middlewares/Third_Party/LwIP/src/include/lwip/errno.h:

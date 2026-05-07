@@ -62,6 +62,8 @@ extern struct netif gnetif;
 #define HR_EKRAN_SERVO_SABIT_HIZ   (40313 - 40001)   // 312
 #define HR_EKRAN_SERVO_SABIT_TORK  (40314 - 40001)   // 313
 
+#define HR_GERCEK_METRE_RAW   (42011 - 40001)   // 2010, Real, 2 register
+
 #define COIL_EKRAN_METRE_AKTIF     (5 - 1)           // 4
 #define COIL_EKRAN_YON_SECIMI      (6 - 1)           // 5
 #define COIL_METRE_SIFIRLAMA       (7 - 1)           // 6
@@ -161,6 +163,9 @@ static int modbus_write_single_register(uint16_t reg_addr,
                                         uint16_t value);
 
 static int modbus_eth_link_ready(void);
+
+static int plc_read_float_holding(uint16_t raw_reg_addr, float *out_value);
+static void telemetry_send_meter_to_esp(void);
 
 /* USER CODE END PFP */
 
@@ -498,6 +503,81 @@ static int modbus_write_single_coil(uint16_t coil_addr, uint8_t state)
 
   modbus_uart_io_fail_throttled();
   return -1;
+}
+
+static int plc_read_float_holding(uint16_t raw_reg_addr, float *out_value)
+{
+  int sock;
+  uint8_t request[12];
+  uint8_t response[32];
+
+  if (out_value == NULL)
+    return -1;
+
+  sock = modbus_open_socket();
+  if (sock < 0)
+    return -1;
+
+  request[0] = 0x00; request[1] = 0x41;
+  request[2] = 0x00; request[3] = 0x00;
+  request[4] = 0x00; request[5] = 0x06;
+  request[6] = PLC_UNIT_ID;
+  request[7] = 0x03;
+  request[8]  = (raw_reg_addr >> 8) & 0xFF;
+  request[9]  = raw_reg_addr & 0xFF;
+  request[10] = 0x00;
+  request[11] = 0x02;   // Real = 2 register
+
+  int sent = send(sock, request, sizeof(request), 0);
+  if (sent <= 0)
+  {
+    (void)closesocket(sock);
+    return -1;
+  }
+
+  int len = recv(sock, response, sizeof(response), 0);
+
+  if (len <= 0)
+  {
+    (void)closesocket(sock);
+    return -1;
+  }
+
+  (void)closesocket(sock);
+
+  if (len >= 13 && response[7] == 0x03 && response[8] == 0x04)
+  {
+    uint16_t w1 = ((uint16_t)response[9]  << 8) | response[10];
+    uint16_t w2 = ((uint16_t)response[11] << 8) | response[12];
+
+    uint32_t raw_swapped = ((uint32_t)w2 << 16) | w1;
+
+    float val;
+    memcpy(&val, &raw_swapped, sizeof(float));
+
+    *out_value = val;
+    return 0;
+  }
+
+  return -1;
+}
+
+static void telemetry_send_meter_to_esp(void)
+{
+  float metre = 0.0f;
+  char msg[64];
+
+  if (plc_read_float_holding(HR_GERCEK_METRE_RAW, &metre) == 0)
+  {
+    int metre_x100 = (int)(metre * 100.0f);
+
+    snprintf(msg, sizeof(msg),
+             "MTR,%d.%02d\r\n",
+             metre_x100 / 100,
+             metre_x100 % 100);
+
+    esp_send_text(msg);
+  }
 }
 
 static void plc_start(void)
@@ -1317,6 +1397,14 @@ void StartDefaultTask(void *argument)
       (void)mb;
       mb_fail_streak = 0;
       next_modbus_ms = now + 5000U;
+    }
+
+    static uint32_t last_meter_ms = 0;
+
+    if ((now - last_meter_ms) >= 1000U)
+    {
+      last_meter_ms = now;
+      telemetry_send_meter_to_esp();
     }
 
     /* Small chunk delay so UART polling stays responsive. */

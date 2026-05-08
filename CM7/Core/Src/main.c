@@ -63,6 +63,7 @@ extern struct netif gnetif;
 #define HR_EKRAN_SERVO_SABIT_TORK  (40314 - 40001)   // 313
 
 #define HR_GERCEK_METRE_RAW   (42011 - 40001)   // 2010, Real, 2 register
+#define HR_HIZ_M_SN_RAW   (42029 - 40001)   // 2028, Real, 2 register
 
 #define COIL_EKRAN_METRE_AKTIF     (5 - 1)           // 4
 #define COIL_EKRAN_YON_SECIMI      (6 - 1)           // 5
@@ -138,6 +139,8 @@ static uint32_t modbus_uart_last_io_fail_ms;
 
 /* Gate START command to avoid overlapping sequences */
 static volatile uint8_t plc_busy = 0;
+static volatile uint8_t plc_running = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -165,7 +168,7 @@ static int modbus_write_single_register(uint16_t reg_addr,
 static int modbus_eth_link_ready(void);
 
 static int plc_read_float_holding(uint16_t raw_reg_addr, float *out_value);
-static void telemetry_send_meter_to_esp(void);
+static void telemetry_send_live_to_esp(void);
 
 /* USER CODE END PFP */
 
@@ -562,17 +565,17 @@ static int plc_read_float_holding(uint16_t raw_reg_addr, float *out_value)
   return -1;
 }
 
-static void telemetry_send_meter_to_esp(void)
+static void telemetry_send_live_to_esp(void)
 {
   float metre = 0.0f;
-  char msg[64];
+  char msg[96];
 
   if (plc_read_float_holding(HR_GERCEK_METRE_RAW, &metre) == 0)
   {
     int metre_x100 = (int)(metre * 100.0f);
 
     snprintf(msg, sizeof(msg),
-             "MTR,%d.%02d\r\n",
+             "LIVE,%d.%02d,0.00\r\n",
              metre_x100 / 100,
              metre_x100 % 100);
 
@@ -710,10 +713,12 @@ void plc_start_fixed_mode_from_esp(void)
   osDelay(200);
 
   uart_send_text("PLC START DONE\r\n");
+  plc_running = 1;
 }
 
 void plc_stop_from_esp(void)
 {
+  plc_running = 0;
   uart_send_text("\r\nESP KOMUT GELDI -> STOP\r\n");
   plc_busy = 0;
   plc_stop();
@@ -1401,10 +1406,10 @@ void StartDefaultTask(void *argument)
 
     static uint32_t last_meter_ms = 0;
 
-    if ((now - last_meter_ms) >= 1000U)
+    if (plc_running && ((now - last_meter_ms) >= 2000U))
     {
       last_meter_ms = now;
-      telemetry_send_meter_to_esp();
+      telemetry_send_live_to_esp();
     }
 
     /* Small chunk delay so UART polling stays responsive. */

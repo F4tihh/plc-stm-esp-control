@@ -3249,7 +3249,7 @@ void StartDefaultTask(void *argument)
 
     static uint32_t last_meter_ms = 0;
 
-    if (plc_running && ((now - last_meter_ms) >= 2000U))
+    if (plc_running && ((now - last_meter_ms) >= 1000U))
  80018da:	4b2a      	ldr	r3, [pc, #168]	@ (8001984 <StartDefaultTask+0x2c8>)
  80018dc:	781b      	ldrb	r3, [r3, #0]
  80018de:	b2db      	uxtb	r3, r3
@@ -3259,7 +3259,7 @@ void StartDefaultTask(void *argument)
  80018e6:	681b      	ldr	r3, [r3, #0]
  80018e8:	f8d7 2098 	ldr.w	r2, [r7, #152]	@ 0x98
  80018ec:	1ad3      	subs	r3, r2, r3
- 80018ee:	f5b3 6ffa 	cmp.w	r3, #2000	@ 0x7d0
+ 80018ee:	f5b3 7f7a 	cmp.w	r3, #1000	@ 0x3e8
  80018f2:	d305      	bcc.n	8001900 <StartDefaultTask+0x244>
     {
       last_meter_ms = now;

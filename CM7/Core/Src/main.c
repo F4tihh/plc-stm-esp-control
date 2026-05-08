@@ -1406,7 +1406,7 @@ void StartDefaultTask(void *argument)
 
     static uint32_t last_meter_ms = 0;
 
-    if (plc_running && ((now - last_meter_ms) >= 2000U))
+    if (plc_running && ((now - last_meter_ms) >= 1000U))
     {
       last_meter_ms = now;
       telemetry_send_live_to_esp();

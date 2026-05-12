@@ -17,6 +17,7 @@
 /* USER CODE BEGIN Includes */
 #include "lan8742.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
@@ -64,6 +65,7 @@ extern struct netif gnetif;
 
 #define HR_GERCEK_METRE_RAW   (42011 - 40001)   // 2010, Real, 2 register
 #define HR_HIZ_M_SN_RAW   (42029 - 40001)   // 2028, Real, 2 register
+#define HR_MAX_HIZ_M_SN_RAW   (42037 - 40001)   // 2036, Real, 2 register
 
 #define COIL_EKRAN_METRE_AKTIF     (5 - 1)           // 4
 #define COIL_EKRAN_YON_SECIMI      (6 - 1)           // 5
@@ -140,6 +142,9 @@ static uint32_t modbus_uart_last_io_fail_ms;
 /* Pause telemetry Modbus reads during command bursts */
 static volatile uint32_t modbus_command_guard_until_ms = 0;
 
+/* Set during any Modbus write sequence so telemetry skips opening a socket */
+static volatile uint8_t modbus_command_active = 0;
+
 /* Gate START command to avoid overlapping sequences */
 static volatile uint8_t plc_busy = 0;
 static volatile uint8_t plc_running = 0;
@@ -174,15 +179,25 @@ static int modbus_write_single_register(uint16_t reg_addr,
 static int modbus_eth_link_ready(void);
 
 static int plc_read_float_holding(uint16_t raw_reg_addr, float *out_value);
+static int plc_read_float_holding_on_socket(int sock, uint16_t raw_reg_addr, float *out_value);
 static void telemetry_send_live_to_esp(void);
+static void modbus_command_release_guard(void);
 
 /* USER CODE END PFP */
 
 /* USER CODE BEGIN 0 */
 
+static void modbus_command_release_guard(void)
+{
+  modbus_command_active = 0U;
+  modbus_command_guard_until_ms = osKernelGetTickCount() + 1500U;
+}
+
 static void plc_apply_live_torque(void)
 {
   char msg[128];
+
+  modbus_command_active = 1U;
 
   snprintf(msg, sizeof(msg),
            "LIVE TORQUE UPDATE -> TORQUE=%d\r\n",
@@ -192,6 +207,7 @@ static void plc_apply_live_torque(void)
   if (!modbus_eth_link_ready())
   {
     uart_send_text("TORQUE UPDATE FAIL -> ETH/PLC LINK DOWN\r\n");
+    modbus_command_release_guard();
     return;
   }
 
@@ -204,11 +220,15 @@ static void plc_apply_live_torque(void)
   {
     uart_send_text("TORQUE UPDATE FAIL\r\n");
   }
+
+  modbus_command_release_guard();
 }
 
 static void plc_apply_live_speed(void)
 {
   char msg[128];
+
+  modbus_command_active = 1U;
 
   snprintf(msg, sizeof(msg),
            "LIVE SPEED UPDATE -> SPEED=%d\r\n",
@@ -218,6 +238,7 @@ static void plc_apply_live_speed(void)
   if (!modbus_eth_link_ready())
   {
     uart_send_text("SPEED UPDATE FAIL -> ETH/PLC LINK DOWN\r\n");
+    modbus_command_release_guard();
     return;
   }
 
@@ -230,6 +251,8 @@ static void plc_apply_live_speed(void)
   {
     uart_send_text("SPEED UPDATE FAIL\r\n");
   }
+
+  modbus_command_release_guard();
 }
 
 void uart_send_text(const char *text)
@@ -772,21 +795,124 @@ static int plc_read_float_holding(uint16_t raw_reg_addr, float *out_value)
   return -1;
 }
 
+static int plc_read_float_holding_on_socket(int sock, uint16_t raw_reg_addr, float *out_value)
+{
+  uint8_t request[12];
+  uint8_t response[32];
+
+  if (out_value == NULL)
+    return -1;
+
+  if (sock < 0)
+    return -1;
+
+  request[0] = 0x00; request[1] = 0x41;
+  request[2] = 0x00; request[3] = 0x00;
+  request[4] = 0x00; request[5] = 0x06;
+  request[6] = PLC_UNIT_ID;
+  request[7] = 0x03;
+  request[8]  = (raw_reg_addr >> 8) & 0xFF;
+  request[9]  = raw_reg_addr & 0xFF;
+  request[10] = 0x00;
+  request[11] = 0x02;   // Real = 2 register
+
+  int sent = send(sock, request, (int)sizeof(request), 0);
+  if (sent <= 0)
+  {
+    return -1;
+  }
+
+  fd_set rfds;
+  struct timeval tv;
+
+  FD_ZERO(&rfds);
+  FD_SET(sock, &rfds);
+
+  tv.tv_sec = MODBUS_RECV_TIMEOUT_MS / 1000;
+  tv.tv_usec = (MODBUS_RECV_TIMEOUT_MS % 1000) * 1000;
+
+  int sel = select(sock + 1, &rfds, NULL, NULL, &tv);
+  if (sel <= 0)
+  {
+    return -1;
+  }
+
+  int len = recv(sock, response, (int)sizeof(response), 0);
+  if (len <= 0)
+  {
+    return -1;
+  }
+
+  if (len >= 13 && response[7] == 0x03 && response[8] == 0x04)
+  {
+    uint16_t w1 = ((uint16_t)response[9]  << 8) | response[10];
+    uint16_t w2 = ((uint16_t)response[11] << 8) | response[12];
+
+    uint32_t raw_swapped = ((uint32_t)w2 << 16) | w1;
+
+    float val;
+    memcpy(&val, &raw_swapped, sizeof(float));
+
+    *out_value = val;
+    return 0;
+  }
+
+  return -1;
+}
+
+/* Signed fixed-point (2 decimals) for LIVE telemetry; integer % on negatives breaks frac. */
+static void telemetry_fmt_fixed2(char *buf, size_t buf_len, float v)
+{
+  int xi = (int)(v * 100.0f + (v >= 0.0f ? 0.5f : -0.5f));
+  unsigned abs_x = (unsigned)((xi < 0) ? -xi : xi);
+  int whole = (int)(abs_x / 100U);
+  int frac = (int)(abs_x % 100U);
+
+  if (xi < 0)
+  {
+    (void)snprintf(buf, buf_len, "-%d.%02d", whole, frac);
+  }
+  else
+  {
+    (void)snprintf(buf, buf_len, "%d.%02d", whole, frac);
+  }
+}
+
 static void telemetry_send_live_to_esp(void)
 {
   float metre = 0.0f;
+  float hiz_m_sn = 0.0f;
+  float max_hiz_m_sn = 0.0f;
   char msg[96];
+  char s_metre[16];
+  char s_hiz[16];
+  char s_max_hiz[16];
 
-  int rc = plc_read_float_holding(HR_GERCEK_METRE_RAW, &metre);
-
-  if (rc == 0)
+  int sock = modbus_open_socket();
+  if (sock < 0)
   {
-    int metre_x100 = (int)(metre * 100.0f);
+    return;
+  }
 
-    snprintf(msg, sizeof(msg),
-             "LIVE,%d.%02d,0.00\r\n",
-             metre_x100 / 100,
-             metre_x100 % 100);
+  int ok_metre = (plc_read_float_holding_on_socket(sock, HR_GERCEK_METRE_RAW, &metre) == 0);
+  (void)plc_read_float_holding_on_socket(sock, HR_HIZ_M_SN_RAW, &hiz_m_sn);
+  (void)plc_read_float_holding_on_socket(sock, HR_MAX_HIZ_M_SN_RAW, &max_hiz_m_sn);
+
+  (void)closesocket(sock);
+
+  if (ok_metre)
+  {
+    telemetry_fmt_fixed2(s_metre, sizeof(s_metre), metre);
+    telemetry_fmt_fixed2(s_hiz, sizeof(s_hiz), hiz_m_sn);
+    telemetry_fmt_fixed2(s_max_hiz, sizeof(s_max_hiz), max_hiz_m_sn);
+
+    (void)snprintf(msg, sizeof(msg),
+                   "LIVE,%s,%s,%d,%d,%s\r\n",
+                   s_metre,
+                   s_hiz,
+                   current_torque,
+                   current_speed,
+                   s_max_hiz);
 
     esp_send_text(msg);
   }
@@ -794,21 +920,26 @@ static void telemetry_send_live_to_esp(void)
 
 static void plc_start(void)
 {
+  modbus_command_active = 1U;
   uart_send_text("PLC START veriliyor\r\n");
   modbus_write_single_coil(COIL_EKRAN_START, 1);
   osDelay(100);
   modbus_write_single_coil(COIL_SISTEM_STARTLI, 1);
+  modbus_command_release_guard();
 }
 
 static void plc_stop(void)
 {
   int sock;
+
+  modbus_command_active = 1U;
   uart_send_text("PLC STOP veriliyor\r\n");
 
   sock = modbus_open_socket();
   if (sock < 0)
   {
     uart_send_text("STOP FAIL -> SOCKET OPEN\r\n");
+    modbus_command_release_guard();
     return;
   }
 
@@ -817,6 +948,7 @@ static void plc_stop(void)
   {
     uart_send_text("STOP FAIL -> COIL START\r\n");
     (void)closesocket(sock);
+    modbus_command_release_guard();
     return;
   }
   osDelay(150);
@@ -825,6 +957,7 @@ static void plc_stop(void)
   {
     uart_send_text("STOP FAIL -> COIL RUN\r\n");
     (void)closesocket(sock);
+    modbus_command_release_guard();
     return;
   }
   osDelay(150);
@@ -834,6 +967,7 @@ static void plc_stop(void)
   {
     uart_send_text("STOP FAIL -> REG HIZ_GIDEN\r\n");
     (void)closesocket(sock);
+    modbus_command_release_guard();
     return;
   }
   osDelay(150);
@@ -842,6 +976,7 @@ static void plc_stop(void)
   {
     uart_send_text("STOP FAIL -> REG TORK_GIDEN\r\n");
     (void)closesocket(sock);
+    modbus_command_release_guard();
     return;
   }
   osDelay(150);
@@ -849,6 +984,7 @@ static void plc_stop(void)
   (void)closesocket(sock);
 
   uart_send_text("PLC STOP komutlari tamamlandi\r\n");
+  modbus_command_release_guard();
 }
 
 static void plc_set_speed_torque(int16_t speed, uint16_t torque)
@@ -935,6 +1071,8 @@ void plc_start_fixed_mode_from_esp(void)
 {
   int sock;
 
+  modbus_command_active = 1U;
+
   current_torque = 5;
   current_speed = 100;
 
@@ -944,6 +1082,7 @@ void plc_start_fixed_mode_from_esp(void)
   if (sock < 0)
   {
     uart_send_text("START FAIL -> SOCKET OPEN\r\n");
+    modbus_command_release_guard();
     return;
   }
 
@@ -951,6 +1090,7 @@ void plc_start_fixed_mode_from_esp(void)
   {
     uart_send_text("START FAIL -> REG 312\r\n");
     (void)closesocket(sock);
+    modbus_command_release_guard();
     return;
   }
   osDelay(200);
@@ -959,6 +1099,7 @@ void plc_start_fixed_mode_from_esp(void)
   {
     uart_send_text("START FAIL -> REG 313\r\n");
     (void)closesocket(sock);
+    modbus_command_release_guard();
     return;
   }
   osDelay(200);
@@ -967,6 +1108,7 @@ void plc_start_fixed_mode_from_esp(void)
   {
     uart_send_text("START FAIL -> COIL START\r\n");
     (void)closesocket(sock);
+    modbus_command_release_guard();
     return;
   }
   osDelay(200);
@@ -975,6 +1117,7 @@ void plc_start_fixed_mode_from_esp(void)
   {
     uart_send_text("START FAIL -> COIL RUN\r\n");
     (void)closesocket(sock);
+    modbus_command_release_guard();
     return;
   }
   osDelay(200);
@@ -983,6 +1126,7 @@ void plc_start_fixed_mode_from_esp(void)
 
   uart_send_text("PLC START DONE\r\n");
   plc_running = 1;
+  modbus_command_release_guard();
 }
 
 void plc_stop_from_esp(void)
@@ -1015,7 +1159,6 @@ static void esp_check_uart_command(void)
   {
     uart_send_text("\r\nUART CMD -> S / STOP\r\n");
     plc_busy = 0;
-    modbus_command_guard_until_ms = osKernelGetTickCount() + 1500U;
     plc_stop_from_esp();
 
     memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
@@ -1032,7 +1175,6 @@ static void esp_check_uart_command(void)
       return;
     }
     live_setpoint_last_ms = now_ms;
-    modbus_command_guard_until_ms = now_ms + 1000U;
 
     current_torque += 5;
 
@@ -1055,7 +1197,6 @@ static void esp_check_uart_command(void)
       return;
     }
     live_setpoint_last_ms = now_ms;
-    modbus_command_guard_until_ms = now_ms + 1000U;
 
     current_torque -= 5;
 
@@ -1078,7 +1219,6 @@ static void esp_check_uart_command(void)
       return;
     }
     live_setpoint_last_ms = now_ms;
-    modbus_command_guard_until_ms = now_ms + 1000U;
 
     current_speed += 100;
 
@@ -1101,7 +1241,6 @@ static void esp_check_uart_command(void)
       return;
     }
     live_setpoint_last_ms = now_ms;
-    modbus_command_guard_until_ms = now_ms + 1000U;
 
     current_speed -= 100;
 
@@ -1135,7 +1274,6 @@ static void esp_check_uart_command(void)
     esp_last_start_ms = now_ms;
 
     plc_busy = 1;
-    modbus_command_guard_until_ms = now_ms + 1500U;
     plc_start_fixed_mode_from_esp();
     plc_busy = 0;
 
@@ -1144,12 +1282,82 @@ static void esp_check_uart_command(void)
     return;
   }
 
+  /* Line-based commands (in addition to single-char commands above):
+     - V:<value>  speed setpoint (0..2000), prefix avoids clash with STOP 'S'
+     - Q:<value>  torque setpoint (0..50)
+     Accumulate bytes until newline, then parse. */
   if (esp_rx_byte == '\r' || esp_rx_byte == '\n' || esp_rx_byte == 0x00)
   {
+    if (esp_cmd_index == 0)
+    {
+      return;
+    }
+
+    esp_cmd_buffer[esp_cmd_index] = '\0';
+
+    if (strncmp(esp_cmd_buffer, "V:", 2) == 0)
+    {
+      int v = atoi(&esp_cmd_buffer[2]);
+      if (v < 0) v = 0;
+      if (v > 2000) v = 2000;
+
+      uint32_t now_ms = osKernelGetTickCount();
+      if ((now_ms - live_setpoint_last_ms) < 250U)
+      {
+        uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+      }
+      else
+      {
+        char msg[64];
+        live_setpoint_last_ms = now_ms;
+        current_speed = v;
+        snprintf(msg, sizeof(msg), "UART CMD -> V:%d\r\n", v);
+        uart_send_text(msg);
+        plc_apply_live_speed();
+      }
+    }
+    else if (strncmp(esp_cmd_buffer, "Q:", 2) == 0)
+    {
+      int v = atoi(&esp_cmd_buffer[2]);
+      if (v < 0) v = 0;
+      if (v > 50) v = 50;
+
+      uint32_t now_ms = osKernelGetTickCount();
+      if ((now_ms - live_setpoint_last_ms) < 250U)
+      {
+        uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+      }
+      else
+      {
+        char msg[64];
+        live_setpoint_last_ms = now_ms;
+        current_torque = v;
+        snprintf(msg, sizeof(msg), "UART CMD -> Q:%d\r\n", v);
+        uart_send_text(msg);
+        plc_apply_live_torque();
+      }
+    }
+    else
+    {
+      uart_send_text("UART LINE IGNORED\r\n");
+    }
+
+    memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
+    esp_cmd_index = 0;
     return;
   }
 
-  uart_send_text("UART BYTE IGNORED\r\n");
+  /* Accumulate printable bytes for line commands. */
+  if (esp_cmd_index < (uint8_t)(sizeof(esp_cmd_buffer) - 1U))
+  {
+    esp_cmd_buffer[esp_cmd_index++] = (char)esp_rx_byte;
+    return;
+  }
+
+  /* Overflow: reset buffer to avoid stale parse. */
+  uart_send_text("UART LINE OVERFLOW\r\n");
+  memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
+  esp_cmd_index = 0;
 }
 
 int modbus_read_all_registers(void)
@@ -1714,6 +1922,7 @@ void StartDefaultTask(void *argument)
     static uint32_t last_meter_ms = 0;
 
     if (plc_running &&
+        (modbus_command_active == 0U) &&
         ((now - last_meter_ms) >= 1000U) &&
         ((int32_t)(now - modbus_command_guard_until_ms) >= 0))
     {

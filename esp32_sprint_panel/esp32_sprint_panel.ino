@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <WebServer.h>
+#include <math.h>
 
 const char* ssid = "STM_UART_TEST";
 const char* password = "12345678";
@@ -17,6 +18,12 @@ typedef enum
 } PanelMode_t;
 
 static PanelMode_t panelMode = PANEL_MODE_FREE;
+
+/* Edge-triggered staged UART (V:/Q:) — only on stage change, min 1000 ms between sends */
+static int lastAppliedStage = -1;
+static int lastAppliedSpeed = -1;
+static int lastAppliedTorque = -1;
+static unsigned long lastStagedCommandMs = 0;
 
 String uartLine = "";
 
@@ -115,6 +122,77 @@ static String buildHistoryTableHtml()
   }
 
   return html;
+}
+
+static void stagedTargetFromMetre(float metre, int* stageIdx, int* outSpd, int* outTrq)
+{
+  static const int speeds[] = { 100, 200, 300, 400, 500 };
+  static const int torqs[] = { 5, 5, 10, 10, 15 };
+
+  float x = fabsf(metre);
+  if (x >= 10.0f)
+    x = 9.999f;
+
+  int idx = (int)(x / 2.0f);
+  if (idx < 0)
+    idx = 0;
+  if (idx > 4)
+    idx = 4;
+
+  *stageIdx = idx;
+  *outSpd = speeds[idx];
+  *outTrq = torqs[idx];
+}
+
+static void maybeApplyStagedAfterLive(void)
+{
+  if (panelMode != PANEL_MODE_STAGED)
+    return;
+
+  int idx = 0;
+  int spd = 0;
+  int trq = 0;
+
+  stagedTargetFromMetre(currentMeter, &idx, &spd, &trq);
+
+  Serial.printf("WEB: STAGED LIVE metre=%.2f stage=%d last=%d\n",
+                (double)currentMeter, idx, lastAppliedStage);
+
+  if (idx == lastAppliedStage)
+  {
+    Serial.printf("WEB: STAGED SKIP SAME stage=%d\n", idx);
+    return;
+  }
+
+  unsigned long now = millis();
+  if (lastAppliedStage != -1 && (now - lastStagedCommandMs) < 1000UL)
+  {
+    Serial.println("WEB: STAGED SKIP INTERVAL");
+    return;
+  }
+
+  char spdChar = '1' + idx;  // 0->'1', 1->'2', 2->'3', 3->'4', 4->'5'
+  Serial.printf("WEB: STAGED SEND SPEED CHAR=%c speed=%d\n", spdChar, spd);
+  Serial2.write((uint8_t)spdChar);
+
+  delay(150);
+
+  char trqChar;
+  if (idx <= 1)
+    trqChar = 'a';
+  else if (idx <= 3)
+    trqChar = 'b';
+  else
+    trqChar = 'c';
+  Serial.printf("WEB: STAGED SEND TORQUE CHAR=%c torque=%d\n", trqChar, trq);
+  Serial2.write((uint8_t)trqChar);
+
+  lastAppliedStage = idx;
+  lastAppliedSpeed = spd;
+  lastAppliedTorque = trq;
+  lastStagedCommandMs = now;
+
+  Serial.printf("WEB: STAGED APPLY stage=%d speed=%d torque=%d\n", idx, spd, trq);
 }
 
 static bool parseLivePayload(const String& line,
@@ -312,6 +390,7 @@ void handleRoot()
       border-radius: 12px;
       padding: 0.75rem 0.85rem;
       cursor: pointer;
+      user-select: none;
       transition: border-color 0.15s, box-shadow 0.15s;
     }
     .mode-card:hover { border-color: #6b7280; }
@@ -427,16 +506,16 @@ void handleRoot()
 <h1>STM32 PLC CONTROL</h1>
 <p class="sub">ESP32 → STM32 → PLC</p>
 
-<div class="mode-row">
-  <div class="mode-card" data-mode="0" onclick="selectModeFree()">
+<div class="mode-row" id="modeRow">
+  <div class="mode-card" data-mode="0" role="button" tabindex="0">
     <h4>Serbest Mod</h4>
     <p>Hız ve tork elle; mevcut davranış.</p>
   </div>
-  <div class="mode-card" data-mode="1" onclick="selectModeTest()">
+  <div class="mode-card" data-mode="1" role="button" tabindex="0">
     <h4>10m Test Modu</h4>
     <p>10 m test akışı (TEST BAŞLAT ile).</p>
   </div>
-  <div class="mode-card" data-mode="2" onclick="selectModeStaged()">
+  <div class="mode-card" data-mode="2" role="button" tabindex="0">
     <h4>Kademeli Mod</h4>
     <p>Mesafeye göre hedef setpoint (sadece gösterim).</p>
   </div>
@@ -452,7 +531,7 @@ void handleRoot()
   <div class="smallValue">Anlık metre: <span id="stagedMetre">—</span> m</div>
   <div class="smallValue">Aşama: <span id="stagedStageIdx">—</span> · Mesafe aralığı: <span id="stagedRange">—</span> m</div>
   <div class="smallValue">Hedef set hız: <span id="stagedTgtSpd">—</span> · Hedef tork: <span id="stagedTgtTrq">—</span></div>
-  <p style="font-size:0.78rem;color:#9ca3af;margin:0.5rem 0 0;"><strong>Otomatik komut gönderimi kapalı</strong> — STM32 UART’a V:/Q: satırı gönderilmez; kademe hedefleri yalnızca panelde gösterilir.</p>
+  <p style="font-size:0.78rem;color:#9ca3af;margin:0.5rem 0 0;">Aşama değişince STM32’a <strong>V:</strong> / <strong>Q:</strong> gönderilir (en az 1 sn aralık); her LIVE’da değil.</p>
   <p style="font-size:0.78rem;color:#9ca3af;margin:0.35rem 0 0;">Kademeli mod şu an gösterim modudur.</p>
   <h2 style="margin-top:1rem;font-size:0.95rem;">Kademe tablosu</h2>
   <table>
@@ -565,6 +644,78 @@ const CHART_REDRAW_MS = 2000;
 
 let uiMode = "0";
 
+function applyModeUi(modeKey, statusText)
+{
+  document.getElementById("status").innerHTML = statusText;
+  uiMode = modeKey;
+  document.getElementById("activeModeLabel").innerHTML = MODE_LABELS[modeKey] || modeKey;
+  setModeHighlight(modeKey);
+  var sp = document.getElementById("stagedPanel");
+  if (modeKey === "2")
+    sp.classList.remove("staged-hidden");
+  else
+    sp.classList.add("staged-hidden");
+}
+
+function requestModeFromEsp(modeKey)
+{
+  var paths = { "0": "/mode/free", "1": "/mode/test", "2": "/mode/staged" };
+  var path = paths[modeKey];
+  if (!path)
+    return;
+
+  fetch(path, { method: "GET", cache: "no-store" })
+  .then(function(r) {
+    if (!r.ok)
+      throw new Error("HTTP " + r.status);
+    return r.text();
+  })
+  .then(function(data) {
+    applyModeUi(modeKey, data);
+  })
+  .catch(function() {
+    document.getElementById("status").innerHTML = "MODE: istek basarisiz (" + path + ")";
+  });
+}
+
+function selectModeFree()
+{
+  requestModeFromEsp("0");
+}
+
+function selectModeTest()
+{
+  requestModeFromEsp("1");
+}
+
+function selectModeStaged()
+{
+  requestModeFromEsp("2");
+}
+
+function bindModeCards()
+{
+  document.querySelectorAll("#modeRow .mode-card[data-mode]").forEach(function(card) {
+    card.addEventListener("click", function(ev) {
+      ev.preventDefault();
+      var m = card.getAttribute("data-mode");
+      if (m === "0")
+        selectModeFree();
+      else if (m === "1")
+        selectModeTest();
+      else if (m === "2")
+        selectModeStaged();
+    });
+    card.addEventListener("keydown", function(ev) {
+      if (ev.key === "Enter" || ev.key === " ")
+      {
+        ev.preventDefault();
+        card.click();
+      }
+    });
+  });
+}
+
 function computeStagedFromMetre(metreStr)
 {
   let m = Math.abs(parseFloat(metreStr));
@@ -585,55 +736,14 @@ function computeStagedFromMetre(metreStr)
   };
 }
 
-function selectModeFree()
-{
-  fetch("/mode/free")
-  .then(function(r) { return r.text(); })
-  .then(function(data) {
-    document.getElementById("status").innerHTML = data;
-    uiMode = "0";
-    document.getElementById("activeModeLabel").innerHTML = MODE_LABELS["0"];
-    setModeHighlight("0");
-    document.getElementById("stagedPanel").classList.add("staged-hidden");
-  })
-  .catch(function() {});
-}
-
-function selectModeTest()
-{
-  fetch("/mode/test")
-  .then(function(r) { return r.text(); })
-  .then(function(data) {
-    document.getElementById("status").innerHTML = data;
-    uiMode = "1";
-    document.getElementById("activeModeLabel").innerHTML = MODE_LABELS["1"];
-    setModeHighlight("1");
-    document.getElementById("stagedPanel").classList.add("staged-hidden");
-  })
-  .catch(function() {});
-}
-
-function selectModeStaged()
-{
-  fetch("/mode/staged")
-  .then(function(r) { return r.text(); })
-  .then(function(data) {
-    document.getElementById("status").innerHTML = data;
-    uiMode = "2";
-    document.getElementById("activeModeLabel").innerHTML = MODE_LABELS["2"];
-    setModeHighlight("2");
-    document.getElementById("stagedPanel").classList.remove("staged-hidden");
-  })
-  .catch(function() {});
-}
-
 function sendCmd(url)
 {
-  fetch(url)
-  .then(response => response.text())
-  .then(data => {
+  fetch(url, { method: "GET", cache: "no-store" })
+  .then(function(r) { return r.text(); })
+  .then(function(data) {
     document.getElementById("status").innerHTML = data;
-  });
+  })
+  .catch(function() {});
 }
 
 function setModeHighlight(modeId)
@@ -782,6 +892,7 @@ function updateLive()
   .catch(function() {});
 }
 
+bindModeCards();
 setInterval(updateLive, 1000);
 </script>
 
@@ -838,20 +949,35 @@ void handleLive()
 
 void handleModeFree()
 {
+  Serial.println("WEB: MODE FREE");
   panelMode = PANEL_MODE_FREE;
+  lastAppliedStage = -1;
+  lastAppliedSpeed = -1;
+  lastAppliedTorque = -1;
+  lastStagedCommandMs = 0;
   server.send(200, "text/plain", "MOD: SERBEST");
 }
 
 void handleModeTest()
 {
+  Serial.println("WEB: MODE TEST");
   panelMode = PANEL_MODE_TEST;
+  lastAppliedStage = -1;
+  lastAppliedSpeed = -1;
+  lastAppliedTorque = -1;
+  lastStagedCommandMs = 0;
   server.send(200, "text/plain", "MOD: 10m TEST");
 }
 
 void handleModeStaged()
 {
-  panelMode = PANEL_MODE_STAGED;
   Serial.println("WEB: MODE STAGED");
+  panelMode = PANEL_MODE_STAGED;
+  lastAppliedStage = -1;
+  lastAppliedSpeed = -1;
+  lastAppliedTorque = -1;
+  lastStagedCommandMs = 0;
+  Serial.println("WEB: STAGED MODE SELECTED (edge V/Q on stage change)");
   server.send(200, "text/plain", "MOD: KADEMELI");
 }
 
@@ -997,7 +1123,7 @@ void loop()
           liveSetSpeed = setHiz;
           liveMaxHizMs = maxHiz;
 
-          /* Kademeli hedefler tarayıcıda (telemetry metre); /live’da modeSeg yok. Otomatik V:/Q: yok. */
+          maybeApplyStagedAfterLive();
 
           if (testRunning)
           {

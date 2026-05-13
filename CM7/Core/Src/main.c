@@ -176,6 +176,14 @@ void plc_stop_from_esp(void);
 static int modbus_write_single_register(uint16_t reg_addr,
                                         uint16_t value);
 
+static int modbus_open_socket(void);
+static int modbus_write_single_register_on_socket(int sock,
+                                                  uint16_t reg_addr,
+                                                  uint16_t value);
+static int modbus_write_single_coil_on_socket(int sock,
+                                              uint16_t coil_addr,
+                                              uint8_t state);
+
 static int modbus_eth_link_ready(void);
 
 static int plc_read_float_holding(uint16_t raw_reg_addr, float *out_value);
@@ -196,6 +204,8 @@ static void modbus_command_release_guard(void)
 static void plc_apply_live_torque(void)
 {
   char msg[128];
+  int sock;
+  int wr;
 
   modbus_command_active = 1U;
 
@@ -211,8 +221,22 @@ static void plc_apply_live_torque(void)
     return;
   }
 
-  if (modbus_write_single_register(HR_EKRAN_SERVO_SABIT_TORK,
-                                   current_torque) == 0)
+  uart_send_text("TORQUE UPDATE OPEN SOCKET\r\n");
+  sock = modbus_open_socket();
+  if (sock < 0)
+  {
+    uart_send_text("TORQUE UPDATE FAIL -> SOCKET OPEN\r\n");
+    modbus_command_release_guard();
+    return;
+  }
+
+  uart_send_text("TORQUE UPDATE WRITE BEGIN\r\n");
+  wr = modbus_write_single_register_on_socket(sock, HR_EKRAN_SERVO_SABIT_TORK,
+                                               (uint16_t)current_torque);
+  uart_send_text("TORQUE UPDATE WRITE DONE\r\n");
+  (void)closesocket(sock);
+
+  if (wr == 0)
   {
     uart_send_text("TORQUE UPDATE SENT\r\n");
   }
@@ -227,6 +251,8 @@ static void plc_apply_live_torque(void)
 static void plc_apply_live_speed(void)
 {
   char msg[128];
+  int sock;
+  int wr;
 
   modbus_command_active = 1U;
 
@@ -242,8 +268,22 @@ static void plc_apply_live_speed(void)
     return;
   }
 
-  if (modbus_write_single_register(HR_EKRAN_SERVO_SABIT_HIZ,
-                                   current_speed) == 0)
+  uart_send_text("SPEED UPDATE OPEN SOCKET\r\n");
+  sock = modbus_open_socket();
+  if (sock < 0)
+  {
+    uart_send_text("SPEED UPDATE FAIL -> SOCKET OPEN\r\n");
+    modbus_command_release_guard();
+    return;
+  }
+
+  uart_send_text("SPEED UPDATE WRITE BEGIN\r\n");
+  wr = modbus_write_single_register_on_socket(sock, HR_EKRAN_SERVO_SABIT_HIZ,
+                                               (uint16_t)current_speed);
+  uart_send_text("SPEED UPDATE WRITE DONE\r\n");
+  (void)closesocket(sock);
+
+  if (wr == 0)
   {
     uart_send_text("SPEED UPDATE SENT\r\n");
   }
@@ -1254,6 +1294,59 @@ static void esp_check_uart_command(void)
     return;
   }
 
+  /* Staged speed single-character commands from ESP:
+     '1'->100, '2'->200, '3'->300, '4'->400, '5'->500. */
+  if (esp_rx_byte >= '1' && esp_rx_byte <= '5')
+  {
+    uint32_t now_ms = osKernelGetTickCount();
+    if ((now_ms - live_setpoint_last_ms) < 250U)
+    {
+      uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+      return;
+    }
+    live_setpoint_last_ms = now_ms;
+
+    int new_speed = (esp_rx_byte - '0') * 100;
+    current_speed = new_speed;
+
+    char msg[64];
+    snprintf(msg, sizeof(msg), "UART CMD -> STAGE SPEED %d\r\n", new_speed);
+    uart_send_text(msg);
+
+    plc_apply_live_speed();
+
+    return;
+  }
+
+  /* Staged torque single-character commands: 'a'->5, 'b'->10, 'c'->15. */
+  if (esp_rx_byte == 'a' || esp_rx_byte == 'b' || esp_rx_byte == 'c')
+  {
+    uint32_t now_ms = osKernelGetTickCount();
+    if ((now_ms - live_setpoint_last_ms) < 250U)
+    {
+      uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+      return;
+    }
+    live_setpoint_last_ms = now_ms;
+
+    int tq;
+    if (esp_rx_byte == 'a')
+      tq = 5;
+    else if (esp_rx_byte == 'b')
+      tq = 10;
+    else
+      tq = 15;
+    current_torque = tq;
+
+    char msg[64];
+    snprintf(msg, sizeof(msg), "UART CMD -> STAGE TORQUE %d\r\n", tq);
+    uart_send_text(msg);
+
+    plc_apply_live_torque();
+
+    return;
+  }
+
   if (esp_rx_byte == 'R')
   {
     uint32_t now_ms = osKernelGetTickCount();
@@ -1923,7 +2016,7 @@ void StartDefaultTask(void *argument)
 
     if (plc_running &&
         (modbus_command_active == 0U) &&
-        ((now - last_meter_ms) >= 1000U) &&
+        ((now - last_meter_ms) >= 500U) &&
         ((int32_t)(now - modbus_command_guard_until_ms) >= 0))
     {
       last_meter_ms = now;

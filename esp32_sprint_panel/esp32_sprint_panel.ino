@@ -32,6 +32,19 @@ bool testFinished = false;
 
 float startMeter = 0.0;
 float currentMeter = 0.0;
+float previousMeter = 0.0;
+bool havePreviousMeter = false;
+float trainingStartMeter = 0.0;
+bool trainingStartValid = false;
+String lastYonLabel = "—";
+String lastFazLabel = "IDLE";
+
+#define METER_DIR_EPS 0.002f
+
+float safeParkMeter = 0.0f;
+bool safeParkValid = false;
+bool haveLiveMeter = false;
+
 float distanceDone = 0.0;
 float targetDistance = 10.0;
 
@@ -144,6 +157,47 @@ static void stagedTargetFromMetre(float metre, int* stageIdx, int* outSpd, int* 
   *outTrq = torqs[idx];
 }
 
+static void updateTrainingDirectionAndPhase(float m, float dm)
+{
+  if (!trainingStartValid)
+  {
+    lastYonLabel = "—";
+    lastFazLabel = "IDLE";
+    return;
+  }
+
+  if (fabsf(dm) < METER_DIR_EPS)
+  {
+    lastYonLabel = "Sabit";
+    lastFazLabel = "IDLE";
+    return;
+  }
+
+  bool uzaklasiyor = false;
+  if (m > trainingStartMeter && dm > 0.0f)
+    uzaklasiyor = true;
+  else if (m < trainingStartMeter && dm < 0.0f)
+    uzaklasiyor = true;
+
+  if (uzaklasiyor)
+  {
+    lastYonLabel = "Uzaklaşıyor";
+    lastFazLabel = "RESIST";
+  }
+  else
+  {
+    lastYonLabel = "Yaklaşıyor";
+    lastFazLabel = "ASSIST";
+  }
+}
+
+static void sendStmChar(char c)
+{
+  Serial2.write((uint8_t)c);
+  Serial2.flush();
+  Serial.printf("UART TX -> %c\n", c);
+}
+
 static void maybeApplyStagedAfterLive(void)
 {
   if (panelMode != PANEL_MODE_STAGED)
@@ -173,19 +227,7 @@ static void maybeApplyStagedAfterLive(void)
 
   char spdChar = '1' + idx;  // 0->'1', 1->'2', 2->'3', 3->'4', 4->'5'
   Serial.printf("WEB: STAGED SEND SPEED CHAR=%c speed=%d\n", spdChar, spd);
-  Serial2.write((uint8_t)spdChar);
-
-  delay(150);
-
-  char trqChar;
-  if (idx <= 1)
-    trqChar = 'a';
-  else if (idx <= 3)
-    trqChar = 'b';
-  else
-    trqChar = 'c';
-  Serial.printf("WEB: STAGED SEND TORQUE CHAR=%c torque=%d\n", trqChar, trq);
-  Serial2.write((uint8_t)trqChar);
+  sendStmChar(spdChar);
 
   lastAppliedStage = idx;
   lastAppliedSpeed = spd;
@@ -429,6 +471,8 @@ void handleRoot()
     .plus { background: #2563eb; }
     .minus { background: #9333ea; }
     .test { background: #f59e0b; color: #111827; }
+    .origin { background: #0d9488; }
+    .parkcal { background: #0369a1; }
 
     #status {
       margin: 1rem 0 0.25rem;
@@ -553,6 +597,12 @@ void handleRoot()
 </div>
 
 <div class="btn-row">
+  <button class="origin" onclick="sendCmd('/training_start')">Başlangıç Noktasını Belirle</button>
+</div>
+<div class="btn-row">
+  <button class="parkcal" onclick="sendCmd('/calibrate_park')">Güvenli Park Noktasını Kalibre Et</button>
+</div>
+<div class="btn-row">
   <button class="start" onclick="sendCmd('/r')">START</button>
   <button class="stop" onclick="sendCmd('/s')">STOP</button>
 </div>
@@ -577,6 +627,11 @@ void handleRoot()
   <div class="dash-card"><h3>Set Hız</h3><div id="setSpeed" class="val">—</div></div>
   <div class="dash-card"><h3>Tork</h3><div id="torque" class="val">—</div></div>
   <div class="dash-card"><h3>Max Hız</h3><div id="maxspeed" class="val">—</div></div>
+  <div class="dash-card"><h3>Başlangıç Metre</h3><div id="trainingStart" class="val">—</div></div>
+  <div class="dash-card"><h3>Yön</h3><div id="yon" class="val">—</div></div>
+  <div class="dash-card"><h3>Faz</h3><div id="faz" class="val">—</div></div>
+  <div class="dash-card"><h3>Kalibre Park Metresi</h3><div id="safePark" class="val">—</div></div>
+  <div class="dash-card"><h3>Park Durumu</h3><div id="parkStatus" class="val">—</div></div>
 </div>
 
 <div class="section">
@@ -643,6 +698,10 @@ let lastChartRedrawMs = 0;
 const CHART_REDRAW_MS = 2000;
 
 let uiMode = "0";
+
+let trainingStartValue = null;
+let safeParkValue = null;
+let previousUiMeter = null;
 
 function applyModeUi(modeKey, statusText)
 {
@@ -736,12 +795,44 @@ function computeStagedFromMetre(metreStr)
   };
 }
 
+function parseCalibrationMeter(data, expectedStart)
+{
+  var s = (data || "").trim();
+  if (s.indexOf(expectedStart) !== 0)
+    return null;
+  var colon = s.indexOf(":");
+  if (colon < 0)
+    return null;
+  var v = parseFloat(s.substring(colon + 1).trim());
+  if (isNaN(v))
+    return null;
+  return v;
+}
+
 function sendCmd(url)
 {
   fetch(url, { method: "GET", cache: "no-store" })
   .then(function(r) { return r.text(); })
   .then(function(data) {
     document.getElementById("status").innerHTML = data;
+    if (url === "/training_start")
+    {
+      var tm = parseCalibrationMeter(data, "BASLANGIC NOKTASI KAYDEDILDI");
+      if (tm !== null)
+      {
+        trainingStartValue = tm;
+        document.getElementById("trainingStart").innerHTML = tm.toFixed(2) + " m";
+      }
+    }
+    else if (url === "/calibrate_park")
+    {
+      var pm = parseCalibrationMeter(data, "GUVENLI PARK NOKTASI KAYDEDILDI");
+      if (pm !== null)
+      {
+        safeParkValue = pm;
+        document.getElementById("safePark").innerHTML = pm.toFixed(2) + " m";
+      }
+    }
   })
   .catch(function() {});
 }
@@ -854,6 +945,57 @@ function updateLive()
     document.getElementById("setSpeed").innerHTML = values[3];
     document.getElementById("torque").innerHTML = values[2];
     document.getElementById("maxspeed").innerHTML = values[4] + " m/sn";
+
+    document.getElementById("trainingStart").innerHTML =
+      (trainingStartValue === null) ? "—" : (trainingStartValue.toFixed(2) + " m");
+    document.getElementById("safePark").innerHTML =
+      (safeParkValue === null) ? "—" : (safeParkValue.toFixed(2) + " m");
+
+    var meter = parseFloat(values[0]);
+    if (!isNaN(meter))
+    {
+      var dm = (previousUiMeter === null) ? 0 : (meter - previousUiMeter);
+      previousUiMeter = meter;
+
+      var yon = "—";
+      var faz = "IDLE";
+      if (trainingStartValue === null)
+      {
+        yon = "—";
+        faz = "IDLE";
+      }
+      else if (Math.abs(dm) < 0.002)
+      {
+        yon = "Sabit";
+        faz = "IDLE";
+      }
+      else
+      {
+        var uzaklasiyor = (meter > trainingStartValue && dm > 0) ||
+          (meter < trainingStartValue && dm < 0);
+        if (uzaklasiyor)
+        {
+          yon = "Uzaklaşıyor";
+          faz = "RESIST";
+        }
+        else
+        {
+          yon = "Yaklaşıyor";
+          faz = "ASSIST";
+        }
+      }
+      document.getElementById("yon").innerHTML = yon;
+      document.getElementById("faz").innerHTML = faz;
+
+      var parkStatus;
+      if (safeParkValue === null)
+        parkStatus = "KALİBRE EDİLMEDİ";
+      else if (meter <= safeParkValue)
+        parkStatus = "PARKTA";
+      else
+        parkStatus = "PARK DIŞI";
+      document.getElementById("parkStatus").innerHTML = parkStatus;
+    }
 
     document.getElementById("testState").innerHTML = values[5];
     document.getElementById("dist").innerHTML = values[6];
@@ -1000,6 +1142,32 @@ void handleTestStart()
   server.send(200, "text/plain", "10m TEST BASLADI");
 }
 
+void handleTrainingStartSet()
+{
+  trainingStartMeter = currentMeter;
+  trainingStartValid = true;
+  Serial.printf("WEB: TRAINING START METRE=%.3f\n", (double)trainingStartMeter);
+  String msg = "BASLANGIC NOKTASI KAYDEDILDI: ";
+  msg += String(trainingStartMeter, 2);
+  server.send(200, "text/plain", msg);
+}
+
+void handleCalibratePark()
+{
+  safeParkMeter = currentMeter;
+  safeParkValid = true;
+  Serial.printf("WEB: PARK CALIBRATED meter=%.3f\n", (double)safeParkMeter);
+  String msg = "GUVENLI PARK NOKTASI KAYDEDILDI: ";
+  msg += String(safeParkMeter, 2);
+  server.send(200, "text/plain", msg);
+}
+
+void handlePark()
+{
+  Serial.println("WEB: PARK REQUEST");
+  server.send(200, "text/plain", "PARK (GOSTERIM)");
+}
+
 void handleTestReset()
 {
   testRunning = false;
@@ -1018,42 +1186,42 @@ void handleTestReset()
 void handleR()
 {
   Serial.println("WEB: START");
-  Serial2.print("R");
+  sendStmChar('R');
   server.send(200, "text/plain", "START GONDERILDI");
 }
 
 void handleS()
 {
   Serial.println("WEB: STOP");
-  Serial2.print("S");
+  sendStmChar('S');
   server.send(200, "text/plain", "STOP GONDERILDI");
 }
 
 void handleTorquePlus()
 {
   Serial.println("WEB: TORQUE +");
-  Serial2.print("A");
+  sendStmChar('A');
   server.send(200, "text/plain", "TORK ARTIRILDI");
 }
 
 void handleTorqueMinus()
 {
   Serial.println("WEB: TORQUE -");
-  Serial2.print("Z");
+  sendStmChar('Z');
   server.send(200, "text/plain", "TORK AZALTILDI");
 }
 
 void handleSpeedPlus()
 {
   Serial.println("WEB: SPEED +");
-  Serial2.print("K");
+  sendStmChar('K');
   server.send(200, "text/plain", "HIZ ARTIRILDI");
 }
 
 void handleSpeedMinus()
 {
   Serial.println("WEB: SPEED -");
-  Serial2.print("M");
+  sendStmChar('M');
   server.send(200, "text/plain", "HIZ AZALTILDI");
 }
 
@@ -1075,6 +1243,9 @@ void setup()
   server.on("/live", handleLive);
   server.on("/teststart", handleTestStart);
   server.on("/testreset", handleTestReset);
+  server.on("/training_start", handleTrainingStartSet);
+  server.on("/calibrate_park", handleCalibratePark);
+  server.on("/park", handlePark);
 
   server.on("/mode/free", handleModeFree);
   server.on("/mode/test", handleModeTest);
@@ -1103,37 +1274,57 @@ void loop()
     char c = Serial2.read();
     // Serial.write(c);
 
-    if (c == '\n')
+    if (c == '\r' || c == '\n')
     {
       uartLine.trim();
 
-      if (uartLine.startsWith("LIVE,"))
+      if (uartLine.length() > 0)
       {
-        float m = 0.0f;
-        float hiz = 0.0f;
-        int tork = 0;
-        int setHiz = 0;
-        float maxHiz = 0.0f;
-
-        if (parseLivePayload(uartLine, &m, &hiz, &tork, &setHiz, &maxHiz))
+        if (uartLine.startsWith("LIVE,"))
         {
-          currentMeter = m;
-          liveRealSpeedMs = hiz;
-          liveTorque = tork;
-          liveSetSpeed = setHiz;
-          liveMaxHizMs = maxHiz;
+          float m = 0.0f;
+          float hiz = 0.0f;
+          int tork = 0;
+          int setHiz = 0;
+          float maxHiz = 0.0f;
 
-          maybeApplyStagedAfterLive();
-
-          if (testRunning)
+          if (parseLivePayload(uartLine, &m, &hiz, &tork, &setHiz, &maxHiz))
           {
-            if (liveRealSpeedMs > testMaxSpeed)
-              testMaxSpeed = liveRealSpeedMs;
+            haveLiveMeter = true;
 
-            updateTestValues();
+            if (!havePreviousMeter)
+            {
+              previousMeter = m;
+              havePreviousMeter = true;
+              currentMeter = m;
+              lastYonLabel = "Sabit";
+              lastFazLabel = "IDLE";
+            }
+            else
+            {
+              float dm = m - previousMeter;
+              previousMeter = m;
+              currentMeter = m;
+              updateTrainingDirectionAndPhase(m, dm);
+            }
 
-            float elapsedSec = testElapsedMs / 1000.0;
-            addLogPoint(elapsedSec, distanceDone, liveRealSpeedMs);
+            liveRealSpeedMs = hiz;
+            liveTorque = tork;
+            liveSetSpeed = setHiz;
+            liveMaxHizMs = maxHiz;
+
+            maybeApplyStagedAfterLive();
+
+            if (testRunning)
+            {
+              if (liveRealSpeedMs > testMaxSpeed)
+                testMaxSpeed = liveRealSpeedMs;
+
+              updateTestValues();
+
+              float elapsedSec = testElapsedMs / 1000.0;
+              addLogPoint(elapsedSec, distanceDone, liveRealSpeedMs);
+            }
           }
         }
       }
@@ -1142,7 +1333,10 @@ void loop()
     }
     else
     {
-      uartLine += c;
+      if (uartLine.length() < 128)
+        uartLine += c;
+      else
+        uartLine = "";
     }
   }
 }

@@ -83,10 +83,10 @@ extern struct netif gnetif;
 #define ESP_UART_BYTE_TRACE   0
 
 /* Modbus TCP response wait (ms). recv() returns -1 on timeout instead of blocking forever. */
-#define MODBUS_RECV_TIMEOUT_MS 2000
+#define MODBUS_RECV_TIMEOUT_MS 500
 
 /* Max wait for TCP connect (non-blocking connect + select). Avoids indefinite block when PLC is off. */
-#define MODBUS_CONNECT_TIMEOUT_MS  4000
+#define MODBUS_CONNECT_TIMEOUT_MS  500
 
 /* Minimum gap between identical UART alerts (ms) — avoids flooding USART3 when PLC is down. */
 #define MODBUS_UART_PLC_FAIL_MIN_MS   4000
@@ -145,12 +145,29 @@ static volatile uint32_t modbus_command_guard_until_ms = 0;
 /* Set during any Modbus write sequence so telemetry skips opening a socket */
 static volatile uint8_t modbus_command_active = 0;
 
+/* Skip one telemetry cycle after ESP command sequences (START/STOP/live setpoint) */
+static volatile uint8_t telemetry_skip_once = 0U;
+
 /* Gate START command to avoid overlapping sequences */
 static volatile uint8_t plc_busy = 0;
 static volatile uint8_t plc_running = 0;
 
 /* Live setpoint spam guard (K/M/A/Z) */
 static uint32_t live_setpoint_last_ms = 0;
+
+typedef enum
+{
+  MB_CMD_NONE = 0,
+  MB_CMD_START,
+  MB_CMD_STOP,
+  MB_CMD_SPEED_SET,
+  MB_CMD_TORQUE_SET
+} ModbusCommandType_t;
+
+static volatile ModbusCommandType_t pending_cmd = MB_CMD_NONE;
+static volatile int pending_speed = 0;
+static volatile int pending_torque = 0;
+static volatile uint8_t pending_staged_speed_guard = 0U;
 
 /* USER CODE END PV */
 
@@ -190,15 +207,18 @@ static int plc_read_float_holding(uint16_t raw_reg_addr, float *out_value);
 static int plc_read_float_holding_on_socket(int sock, uint16_t raw_reg_addr, float *out_value);
 static void telemetry_send_live_to_esp(void);
 static void modbus_command_release_guard(void);
+static void modbus_command_worker_run(void);
 
 /* USER CODE END PFP */
 
 /* USER CODE BEGIN 0 */
 
+#define STAGED_COMMAND_GUARD_MS 5000U
+
 static void modbus_command_release_guard(void)
 {
   modbus_command_active = 0U;
-  modbus_command_guard_until_ms = osKernelGetTickCount() + 1500U;
+  modbus_command_guard_until_ms = osKernelGetTickCount() + 3000U;
 }
 
 static void plc_apply_live_torque(void)
@@ -234,7 +254,9 @@ static void plc_apply_live_torque(void)
   wr = modbus_write_single_register_on_socket(sock, HR_EKRAN_SERVO_SABIT_TORK,
                                                (uint16_t)current_torque);
   uart_send_text("TORQUE UPDATE WRITE DONE\r\n");
+  uart_send_text("TORQUE UPDATE CLOSE BEGIN\r\n");
   (void)closesocket(sock);
+  uart_send_text("TORQUE UPDATE CLOSE DONE\r\n");
 
   if (wr == 0)
   {
@@ -281,7 +303,9 @@ static void plc_apply_live_speed(void)
   wr = modbus_write_single_register_on_socket(sock, HR_EKRAN_SERVO_SABIT_HIZ,
                                                (uint16_t)current_speed);
   uart_send_text("SPEED UPDATE WRITE DONE\r\n");
+  uart_send_text("SPEED UPDATE CLOSE BEGIN\r\n");
   (void)closesocket(sock);
+  uart_send_text("SPEED UPDATE CLOSE DONE\r\n");
 
   if (wr == 0)
   {
@@ -361,16 +385,8 @@ static int modbus_open_socket(void)
 {
   int sock;
   int conn_rc;
-  int sel;
-  int rc_fionbio;
   struct sockaddr_in server;
-  fd_set wfds;
-  struct timeval tvsel;
-  struct timeval tvrecv;
-  unsigned long nb = 1U;
-  unsigned long zb = 0U;
-  socklen_t solen;
-  int soerr;
+  struct timeval tvto;
 
   if (!modbus_eth_link_ready())
   {
@@ -378,90 +394,39 @@ static int modbus_open_socket(void)
     return -1;
   }
 
+  uart_send_text("SOCK:CREATE\r\n");
+
   sock = socket(AF_INET, SOCK_STREAM, 0);
 
   if (sock < 0)
   {
-      modbus_uart_socket_fail_throttled();
-      return -1;
+    modbus_uart_socket_fail_throttled();
+    return -1;
   }
 
-  struct timeval tv_short;
-  tv_short.tv_sec = 1;
-  tv_short.tv_usec = 0;
+  uart_send_text("SOCK:CREATED\r\n");
 
-  setsockopt(sock,
-             SOL_SOCKET,
-             SO_RCVTIMEO,
-             &tv_short,
-             sizeof(tv_short));
+  tvto.tv_sec = MODBUS_CONNECT_TIMEOUT_MS / 1000;
+  tvto.tv_usec = (MODBUS_CONNECT_TIMEOUT_MS % 1000) * 1000;
 
-  setsockopt(sock,
-             SOL_SOCKET,
-             SO_SNDTIMEO,
-             &tv_short,
-             sizeof(tv_short));
+  (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tvto, (socklen_t)sizeof(tvto));
+  (void)setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tvto, (socklen_t)sizeof(tvto));
 
   memset(&server, 0, sizeof(server));
   server.sin_family = AF_INET;
   server.sin_port = htons(PLC_MODBUS_PORT);
   server.sin_addr.s_addr = inet_addr(PLC_IP_ADDR);
 
-  rc_fionbio = ioctlsocket(sock, FIONBIO, &nb);
-  if (rc_fionbio != 0)
-  {
-    (void)closesocket(sock);
-    return -1;
-  }
-
+  uart_send_text("SOCK:CONNECT_BLOCKING\r\n");
   conn_rc = connect(sock, (struct sockaddr *)&server, sizeof(server));
   if (conn_rc < 0)
   {
-    if ((errno != EINPROGRESS) && (errno != EWOULDBLOCK))
-    {
-      modbus_uart_plc_fail_throttled();
-      (void)closesocket(sock);
-      return -1;
-    }
-
-    FD_ZERO(&wfds);
-    FD_SET(sock, &wfds);
-    tvsel.tv_sec = MODBUS_CONNECT_TIMEOUT_MS / 1000;
-    tvsel.tv_usec = (MODBUS_CONNECT_TIMEOUT_MS % 1000) * 1000;
-    sel = select(sock + 1, NULL, &wfds, NULL, &tvsel);
-    if (sel <= 0)
-    {
-      modbus_uart_plc_fail_throttled();
-      (void)closesocket(sock);
-      return -1;
-    }
-  }
-
-  solen = (socklen_t)sizeof(soerr);
-  soerr = 0;
-  if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soerr, &solen) != 0)
-  {
-    modbus_uart_plc_fail_throttled();
-    (void)closesocket(sock);
-    return -1;
-  }
-  if (soerr != 0)
-  {
     modbus_uart_plc_fail_throttled();
     (void)closesocket(sock);
     return -1;
   }
 
-  if (ioctlsocket(sock, FIONBIO, &zb) != 0)
-  {
-    (void)closesocket(sock);
-    return -1;
-  }
-
-  tvrecv.tv_sec = MODBUS_RECV_TIMEOUT_MS / 1000;
-  tvrecv.tv_usec = (MODBUS_RECV_TIMEOUT_MS % 1000) * 1000;
-  (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tvrecv, (socklen_t)sizeof(tvrecv));
-
+  uart_send_text("SOCK:READY\r\n");
   return sock;
 }
 
@@ -920,42 +885,16 @@ static void telemetry_fmt_fixed2(char *buf, size_t buf_len, float v)
 
 static void telemetry_send_live_to_esp(void)
 {
-  float metre = 0.0f;
-  float hiz_m_sn = 0.0f;
-  float max_hiz_m_sn = 0.0f;
   char msg[96];
-  char s_metre[16];
-  char s_hiz[16];
-  char s_max_hiz[16];
 
-  int sock = modbus_open_socket();
-  if (sock < 0)
-  {
-    return;
-  }
+  uart_send_text("TEL:CACHED_ONLY\r\n");
 
-  int ok_metre = (plc_read_float_holding_on_socket(sock, HR_GERCEK_METRE_RAW, &metre) == 0);
-  (void)plc_read_float_holding_on_socket(sock, HR_HIZ_M_SN_RAW, &hiz_m_sn);
-  (void)plc_read_float_holding_on_socket(sock, HR_MAX_HIZ_M_SN_RAW, &max_hiz_m_sn);
+  (void)snprintf(msg, sizeof(msg),
+                 "LIVE,0.00,0.00,%d,%d,0.00\r\n",
+                 current_torque,
+                 current_speed);
 
-  (void)closesocket(sock);
-
-  if (ok_metre)
-  {
-    telemetry_fmt_fixed2(s_metre, sizeof(s_metre), metre);
-    telemetry_fmt_fixed2(s_hiz, sizeof(s_hiz), hiz_m_sn);
-    telemetry_fmt_fixed2(s_max_hiz, sizeof(s_max_hiz), max_hiz_m_sn);
-
-    (void)snprintf(msg, sizeof(msg),
-                   "LIVE,%s,%s,%d,%d,%s\r\n",
-                   s_metre,
-                   s_hiz,
-                   current_torque,
-                   current_speed,
-                   s_max_hiz);
-
-    esp_send_text(msg);
-  }
+  esp_send_text(msg);
 }
 
 static void plc_start(void)
@@ -1178,6 +1117,51 @@ void plc_stop_from_esp(void)
   uart_send_text("PLC: STOP DONE\r\n");
 }
 
+static void modbus_command_worker_run(void)
+{
+  ModbusCommandType_t cmd = pending_cmd;
+
+  if (cmd == MB_CMD_NONE)
+  {
+    return;
+  }
+
+  pending_cmd = MB_CMD_NONE;
+
+  switch (cmd)
+  {
+    case MB_CMD_STOP:
+      plc_stop_from_esp();
+      break;
+
+    case MB_CMD_START:
+      plc_start_fixed_mode_from_esp();
+      plc_busy = 0;
+      break;
+
+    case MB_CMD_SPEED_SET:
+      (void)pending_speed;
+      (void)pending_torque;
+      plc_apply_live_speed();
+      if (pending_staged_speed_guard != 0U)
+      {
+        pending_staged_speed_guard = 0U;
+        modbus_command_guard_until_ms = osKernelGetTickCount() + STAGED_COMMAND_GUARD_MS;
+        uart_send_text("STAGED SPEED GUARD 5000ms\r\n");
+      }
+      break;
+
+    case MB_CMD_TORQUE_SET:
+      plc_apply_live_torque();
+      break;
+
+    default:
+      break;
+  }
+
+  telemetry_skip_once = 1U;
+}
+
 static void esp_check_uart_command(void)
 {
   static uint32_t esp_last_start_ms = 0;
@@ -1199,7 +1183,7 @@ static void esp_check_uart_command(void)
   {
     uart_send_text("\r\nUART CMD -> S / STOP\r\n");
     plc_busy = 0;
-    plc_stop_from_esp();
+    pending_cmd = MB_CMD_STOP;
 
     memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
     esp_cmd_index = 0;
@@ -1223,7 +1207,8 @@ static void esp_check_uart_command(void)
 
     uart_send_text("TORQUE PLUS\r\n");
 
-    plc_apply_live_torque();
+    pending_torque = current_torque;
+    pending_cmd = MB_CMD_TORQUE_SET;
 
     return;
   }
@@ -1245,7 +1230,8 @@ static void esp_check_uart_command(void)
 
     uart_send_text("TORQUE MINUS\r\n");
 
-    plc_apply_live_torque();
+    pending_torque = current_torque;
+    pending_cmd = MB_CMD_TORQUE_SET;
 
     return;
   }
@@ -1267,7 +1253,8 @@ static void esp_check_uart_command(void)
 
     uart_send_text("SPEED PLUS\r\n");
 
-    plc_apply_live_speed();
+    pending_speed = current_speed;
+    pending_cmd = MB_CMD_SPEED_SET;
 
     return;
   }
@@ -1289,7 +1276,8 @@ static void esp_check_uart_command(void)
 
     uart_send_text("SPEED MINUS\r\n");
 
-    plc_apply_live_speed();
+    pending_speed = current_speed;
+    pending_cmd = MB_CMD_SPEED_SET;
 
     return;
   }
@@ -1313,7 +1301,9 @@ static void esp_check_uart_command(void)
     snprintf(msg, sizeof(msg), "UART CMD -> STAGE SPEED %d\r\n", new_speed);
     uart_send_text(msg);
 
-    plc_apply_live_speed();
+    pending_speed = current_speed;
+    pending_staged_speed_guard = 1U;
+    pending_cmd = MB_CMD_SPEED_SET;
 
     return;
   }
@@ -1342,7 +1332,8 @@ static void esp_check_uart_command(void)
     snprintf(msg, sizeof(msg), "UART CMD -> STAGE TORQUE %d\r\n", tq);
     uart_send_text(msg);
 
-    plc_apply_live_torque();
+    pending_torque = current_torque;
+    pending_cmd = MB_CMD_TORQUE_SET;
 
     return;
   }
@@ -1367,8 +1358,7 @@ static void esp_check_uart_command(void)
     esp_last_start_ms = now_ms;
 
     plc_busy = 1;
-    plc_start_fixed_mode_from_esp();
-    plc_busy = 0;
+    pending_cmd = MB_CMD_START;
 
     memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
     esp_cmd_index = 0;
@@ -1406,7 +1396,8 @@ static void esp_check_uart_command(void)
         current_speed = v;
         snprintf(msg, sizeof(msg), "UART CMD -> V:%d\r\n", v);
         uart_send_text(msg);
-        plc_apply_live_speed();
+        pending_speed = current_speed;
+        pending_cmd = MB_CMD_SPEED_SET;
       }
     }
     else if (strncmp(esp_cmd_buffer, "Q:", 2) == 0)
@@ -1427,7 +1418,8 @@ static void esp_check_uart_command(void)
         current_torque = v;
         snprintf(msg, sizeof(msg), "UART CMD -> Q:%d\r\n", v);
         uart_send_text(msg);
-        plc_apply_live_torque();
+        pending_torque = current_torque;
+        pending_cmd = MB_CMD_TORQUE_SET;
       }
     }
     else
@@ -1946,6 +1938,7 @@ void StartDefaultTask(void *argument)
 
     /* Poll ESP UART frequently (no long blocking delays). */
     esp_check_uart_command();
+    modbus_command_worker_run();
 
     /* PHY/link checks */
     if (HAL_ETH_ReadPHYRegister(&heth, 0, 0x01, &phy_bsr) != HAL_OK)
@@ -2013,14 +2006,81 @@ void StartDefaultTask(void *argument)
     }
 
     static uint32_t last_meter_ms = 0;
+    static uint32_t dbg_state_ms = 0;
+    static uint32_t dbg_tel_reason_ms = 0;
 
-    if (plc_running &&
-        (modbus_command_active == 0U) &&
-        ((now - last_meter_ms) >= 500U) &&
-        ((int32_t)(now - modbus_command_guard_until_ms) >= 0))
+    if ((now - dbg_state_ms) >= 2000U)
     {
+      ModbusCommandType_t pen = pending_cmd;
+      uint8_t run = plc_running;
+      uint8_t act = modbus_command_active;
+      uint8_t skp = telemetry_skip_once;
+      uint32_t gu = modbus_command_guard_until_ms;
+      uint32_t guard_left = 0U;
+
+      if ((int32_t)(now - gu) < 0)
+      {
+        guard_left = (uint32_t)(gu - now);
+      }
+
+      dbg_state_ms = now;
+      snprintf(msg, sizeof(msg),
+               "DBG:STATE run=%u active=%u skip=%u pend=%u guard_left=%lu now=%lu\r\n",
+               (unsigned int)run,
+               (unsigned int)act,
+               (unsigned int)skp,
+               (unsigned int)pen,
+               (unsigned long)guard_left,
+               (unsigned long)now);
+      uart_send_text(msg);
+    }
+
+    if (telemetry_skip_once)
+    {
+      if ((now - dbg_tel_reason_ms) >= 2000U)
+      {
+        dbg_tel_reason_ms = now;
+        uart_send_text("DBG:TEL:SKIP_ONCE\r\n");
+      }
+      telemetry_skip_once = 0U;
+    }
+    else if ((pending_cmd == MB_CMD_NONE) &&
+             plc_running &&
+             (modbus_command_active == 0U) &&
+             ((now - last_meter_ms) >= 500U) &&
+             ((int32_t)(now - modbus_command_guard_until_ms) >= 0))
+    {
+      uart_send_text("DBG:TEL:CALL\r\n");
       last_meter_ms = now;
       telemetry_send_live_to_esp();
+      uart_send_text("DBG:TEL:DONE\r\n");
+    }
+    else
+    {
+      if ((now - dbg_tel_reason_ms) >= 2000U)
+      {
+        dbg_tel_reason_ms = now;
+        if (plc_running == 0U)
+        {
+          uart_send_text("DBG:TEL:NOT_RUNNING\r\n");
+        }
+        else if (pending_cmd != MB_CMD_NONE)
+        {
+          uart_send_text("DBG:TEL:PENDING\r\n");
+        }
+        else if (modbus_command_active != 0U)
+        {
+          uart_send_text("DBG:TEL:ACTIVE\r\n");
+        }
+        else if ((int32_t)(now - modbus_command_guard_until_ms) < 0)
+        {
+          uart_send_text("DBG:TEL:GUARD\r\n");
+        }
+        else if ((now - last_meter_ms) < 500U)
+        {
+          uart_send_text("DBG:TEL:INTERVAL\r\n");
+        }
+      }
     }
 
     /* Small chunk delay so UART polling stays responsive. */

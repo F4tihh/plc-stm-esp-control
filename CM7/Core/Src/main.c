@@ -37,6 +37,9 @@ extern volatile uint32_t eth_err_irq_count;
 extern ETH_HandleTypeDef heth;
 extern lan8742_Object_t LAN8742;
 extern struct netif gnetif;
+
+#include "app_debug.h"
+#include "app_uart_esp.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -180,7 +183,6 @@ static void MX_USART2_UART_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-void uart_send_text(const char *text);
 int modbus_read_all_registers(void);
 void modbus_motion_test_once(void);
 int plc_read_one_holding_register(uint16_t raw_reg_addr, uint16_t *out_value);
@@ -232,39 +234,39 @@ static void plc_apply_live_torque(void)
   snprintf(msg, sizeof(msg),
            "LIVE TORQUE UPDATE -> TORQUE=%d\r\n",
            current_torque);
-  uart_send_text(msg);
+  app_debug_uart(msg);
 
   if (!modbus_eth_link_ready())
   {
-    uart_send_text("TORQUE UPDATE FAIL -> ETH/PLC LINK DOWN\r\n");
+    app_debug_uart("TORQUE UPDATE FAIL -> ETH/PLC LINK DOWN\r\n");
     modbus_command_release_guard();
     return;
   }
 
-  uart_send_text("TORQUE UPDATE OPEN SOCKET\r\n");
+  app_debug_uart("TORQUE UPDATE OPEN SOCKET\r\n");
   sock = modbus_open_socket();
   if (sock < 0)
   {
-    uart_send_text("TORQUE UPDATE FAIL -> SOCKET OPEN\r\n");
+    app_debug_uart("TORQUE UPDATE FAIL -> SOCKET OPEN\r\n");
     modbus_command_release_guard();
     return;
   }
 
-  uart_send_text("TORQUE UPDATE WRITE BEGIN\r\n");
+  app_debug_uart("TORQUE UPDATE WRITE BEGIN\r\n");
   wr = modbus_write_single_register_on_socket(sock, HR_EKRAN_SERVO_SABIT_TORK,
                                                (uint16_t)current_torque);
-  uart_send_text("TORQUE UPDATE WRITE DONE\r\n");
-  uart_send_text("TORQUE UPDATE CLOSE BEGIN\r\n");
+  app_debug_uart("TORQUE UPDATE WRITE DONE\r\n");
+  app_debug_uart("TORQUE UPDATE CLOSE BEGIN\r\n");
   (void)closesocket(sock);
-  uart_send_text("TORQUE UPDATE CLOSE DONE\r\n");
+  app_debug_uart("TORQUE UPDATE CLOSE DONE\r\n");
 
   if (wr == 0)
   {
-    uart_send_text("TORQUE UPDATE SENT\r\n");
+    app_debug_uart("TORQUE UPDATE SENT\r\n");
   }
   else
   {
-    uart_send_text("TORQUE UPDATE FAIL\r\n");
+    app_debug_uart("TORQUE UPDATE FAIL\r\n");
   }
 
   modbus_command_release_guard();
@@ -281,52 +283,42 @@ static void plc_apply_live_speed(void)
   snprintf(msg, sizeof(msg),
            "LIVE SPEED UPDATE -> SPEED=%d\r\n",
            current_speed);
-  uart_send_text(msg);
+  app_debug_uart(msg);
 
   if (!modbus_eth_link_ready())
   {
-    uart_send_text("SPEED UPDATE FAIL -> ETH/PLC LINK DOWN\r\n");
+    app_debug_uart("SPEED UPDATE FAIL -> ETH/PLC LINK DOWN\r\n");
     modbus_command_release_guard();
     return;
   }
 
-  uart_send_text("SPEED UPDATE OPEN SOCKET\r\n");
+  app_debug_uart("SPEED UPDATE OPEN SOCKET\r\n");
   sock = modbus_open_socket();
   if (sock < 0)
   {
-    uart_send_text("SPEED UPDATE FAIL -> SOCKET OPEN\r\n");
+    app_debug_uart("SPEED UPDATE FAIL -> SOCKET OPEN\r\n");
     modbus_command_release_guard();
     return;
   }
 
-  uart_send_text("SPEED UPDATE WRITE BEGIN\r\n");
+  app_debug_uart("SPEED UPDATE WRITE BEGIN\r\n");
   wr = modbus_write_single_register_on_socket(sock, HR_EKRAN_SERVO_SABIT_HIZ,
                                                (uint16_t)current_speed);
-  uart_send_text("SPEED UPDATE WRITE DONE\r\n");
-  uart_send_text("SPEED UPDATE CLOSE BEGIN\r\n");
+  app_debug_uart("SPEED UPDATE WRITE DONE\r\n");
+  app_debug_uart("SPEED UPDATE CLOSE BEGIN\r\n");
   (void)closesocket(sock);
-  uart_send_text("SPEED UPDATE CLOSE DONE\r\n");
+  app_debug_uart("SPEED UPDATE CLOSE DONE\r\n");
 
   if (wr == 0)
   {
-    uart_send_text("SPEED UPDATE SENT\r\n");
+    app_debug_uart("SPEED UPDATE SENT\r\n");
   }
   else
   {
-    uart_send_text("SPEED UPDATE FAIL\r\n");
+    app_debug_uart("SPEED UPDATE FAIL\r\n");
   }
 
   modbus_command_release_guard();
-}
-
-void uart_send_text(const char *text)
-{
-  HAL_UART_Transmit(&huart3, (uint8_t *)text, strlen(text), HAL_MAX_DELAY);
-}
-
-static void esp_send_text(const char *text)
-{
-  HAL_UART_Transmit(&huart2, (uint8_t *)text, strlen(text), HAL_MAX_DELAY);
 }
 
 static void CPU_CACHE_Enable(void)
@@ -347,7 +339,7 @@ static void modbus_uart_plc_fail_throttled(void)
   if ((t - modbus_uart_last_plc_fail_ms) >= MODBUS_UART_PLC_FAIL_MIN_MS)
   {
     modbus_uart_last_plc_fail_ms = t;
-    uart_send_text("PLC CONNECT FAIL\r\n");
+    app_debug_uart("PLC CONNECT FAIL\r\n");
   }
 }
 
@@ -357,7 +349,7 @@ static void modbus_uart_eth_down_throttled(void)
   if ((t - modbus_uart_last_eth_down_ms) >= MODBUS_UART_ETH_DOWN_MIN_MS)
   {
     modbus_uart_last_eth_down_ms = t;
-    uart_send_text("MODBUS: ETH link/netif down\r\n");
+    app_debug_uart("MODBUS: ETH link/netif down\r\n");
   }
 }
 
@@ -367,7 +359,7 @@ static void modbus_uart_socket_fail_throttled(void)
   if ((t - modbus_uart_last_sock_fail_ms) >= MODBUS_UART_SOCKET_FAIL_MIN_MS)
   {
     modbus_uart_last_sock_fail_ms = t;
-    uart_send_text("SOCKET FAIL\r\n");
+    app_debug_uart("SOCKET FAIL\r\n");
   }
 }
 
@@ -377,7 +369,7 @@ static void modbus_uart_io_fail_throttled(void)
   if ((t - modbus_uart_last_io_fail_ms) >= MODBUS_UART_IO_FAIL_MIN_MS)
   {
     modbus_uart_last_io_fail_ms = t;
-    uart_send_text("MODBUS IO fail\r\n");
+    app_debug_uart("MODBUS IO fail\r\n");
   }
 }
 
@@ -394,7 +386,7 @@ static int modbus_open_socket(void)
     return -1;
   }
 
-  uart_send_text("SOCK:CREATE\r\n");
+  app_debug_uart("SOCK:CREATE\r\n");
 
   sock = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -404,7 +396,7 @@ static int modbus_open_socket(void)
     return -1;
   }
 
-  uart_send_text("SOCK:CREATED\r\n");
+  app_debug_uart("SOCK:CREATED\r\n");
 
   tvto.tv_sec = MODBUS_CONNECT_TIMEOUT_MS / 1000;
   tvto.tv_usec = (MODBUS_CONNECT_TIMEOUT_MS % 1000) * 1000;
@@ -417,7 +409,7 @@ static int modbus_open_socket(void)
   server.sin_port = htons(PLC_MODBUS_PORT);
   server.sin_addr.s_addr = inet_addr(PLC_IP_ADDR);
 
-  uart_send_text("SOCK:CONNECT_BLOCKING\r\n");
+  app_debug_uart("SOCK:CONNECT_BLOCKING\r\n");
   conn_rc = connect(sock, (struct sockaddr *)&server, sizeof(server));
   if (conn_rc < 0)
   {
@@ -426,7 +418,7 @@ static int modbus_open_socket(void)
     return -1;
   }
 
-  uart_send_text("SOCK:READY\r\n");
+  app_debug_uart("SOCK:READY\r\n");
   return sock;
 }
 
@@ -470,9 +462,9 @@ static int modbus_write_single_register(uint16_t reg_addr, uint16_t value)
   if (sel <= 0)
   {
     if (sel == 0)
-      uart_send_text("MODBUS WRITE SELECT TIMEOUT\r\n");
+      app_debug_uart("MODBUS WRITE SELECT TIMEOUT\r\n");
     else
-      uart_send_text("MODBUS WRITE SELECT ERROR\r\n");
+      app_debug_uart("MODBUS WRITE SELECT ERROR\r\n");
 
     (void)closesocket(sock);
     return -1;
@@ -482,7 +474,7 @@ static int modbus_write_single_register(uint16_t reg_addr, uint16_t value)
 
   if (len <= 0)
   {
-    uart_send_text("MODBUS WRITE RECV TIMEOUT\r\n");
+    app_debug_uart("MODBUS WRITE RECV TIMEOUT\r\n");
 
     (void)closesocket(sock);
 
@@ -499,7 +491,7 @@ static int modbus_write_single_register(uint16_t reg_addr, uint16_t value)
              value,
              len);
 
-    uart_send_text(msg);
+    app_debug_uart(msg);
 
     return 0;
   }
@@ -548,9 +540,9 @@ static int modbus_write_single_coil(uint16_t coil_addr, uint8_t state)
   if (sel <= 0)
   {
     if (sel == 0)
-      uart_send_text("MODBUS COIL SELECT TIMEOUT\r\n");
+      app_debug_uart("MODBUS COIL SELECT TIMEOUT\r\n");
     else
-      uart_send_text("MODBUS COIL SELECT ERROR\r\n");
+      app_debug_uart("MODBUS COIL SELECT ERROR\r\n");
 
     (void)closesocket(sock);
     return -1;
@@ -560,7 +552,7 @@ static int modbus_write_single_coil(uint16_t coil_addr, uint8_t state)
 
   if (len <= 0)
   {
-    uart_send_text("MODBUS COIL RECV TIMEOUT\r\n");
+    app_debug_uart("MODBUS COIL RECV TIMEOUT\r\n");
 
     (void)closesocket(sock);
 
@@ -577,7 +569,7 @@ static int modbus_write_single_coil(uint16_t coil_addr, uint8_t state)
              state,
              len);
 
-    uart_send_text(msg);
+    app_debug_uart(msg);
 
     return 0;
   }
@@ -607,7 +599,7 @@ static int modbus_write_single_register_on_socket(int sock, uint16_t reg_addr, u
   int sent = send(sock, req, (int)sizeof(req), 0);
   if (sent <= 0)
   {
-    uart_send_text("MODBUS WRITE REG SEND FAIL\r\n");
+    app_debug_uart("MODBUS WRITE REG SEND FAIL\r\n");
     return -1;
   }
 
@@ -624,16 +616,16 @@ static int modbus_write_single_register_on_socket(int sock, uint16_t reg_addr, u
   if (sel <= 0)
   {
     if (sel == 0)
-      uart_send_text("MODBUS WRITE REG SELECT TIMEOUT\r\n");
+      app_debug_uart("MODBUS WRITE REG SELECT TIMEOUT\r\n");
     else
-      uart_send_text("MODBUS WRITE REG SELECT ERROR\r\n");
+      app_debug_uart("MODBUS WRITE REG SELECT ERROR\r\n");
     return -1;
   }
 
   int len = recv(sock, resp, (int)sizeof(resp), 0);
   if (len <= 0)
   {
-    uart_send_text("MODBUS WRITE REG RECV FAIL\r\n");
+    app_debug_uart("MODBUS WRITE REG RECV FAIL\r\n");
     return -1;
   }
 
@@ -644,11 +636,11 @@ static int modbus_write_single_register_on_socket(int sock, uint16_t reg_addr, u
              reg_addr,
              value,
              len);
-    uart_send_text(msg);
+    app_debug_uart(msg);
     return 0;
   }
 
-  uart_send_text("MODBUS WRITE REG BAD RESP\r\n");
+  app_debug_uart("MODBUS WRITE REG BAD RESP\r\n");
   return -1;
 }
 
@@ -673,7 +665,7 @@ static int modbus_write_single_coil_on_socket(int sock, uint16_t coil_addr, uint
   int sent = send(sock, req, (int)sizeof(req), 0);
   if (sent <= 0)
   {
-    uart_send_text("MODBUS WRITE COIL SEND FAIL\r\n");
+    app_debug_uart("MODBUS WRITE COIL SEND FAIL\r\n");
     return -1;
   }
 
@@ -690,16 +682,16 @@ static int modbus_write_single_coil_on_socket(int sock, uint16_t coil_addr, uint
   if (sel <= 0)
   {
     if (sel == 0)
-      uart_send_text("MODBUS WRITE COIL SELECT TIMEOUT\r\n");
+      app_debug_uart("MODBUS WRITE COIL SELECT TIMEOUT\r\n");
     else
-      uart_send_text("MODBUS WRITE COIL SELECT ERROR\r\n");
+      app_debug_uart("MODBUS WRITE COIL SELECT ERROR\r\n");
     return -1;
   }
 
   int len = recv(sock, resp, (int)sizeof(resp), 0);
   if (len <= 0)
   {
-    uart_send_text("MODBUS WRITE COIL RECV FAIL\r\n");
+    app_debug_uart("MODBUS WRITE COIL RECV FAIL\r\n");
     return -1;
   }
 
@@ -710,11 +702,11 @@ static int modbus_write_single_coil_on_socket(int sock, uint16_t coil_addr, uint
              coil_addr,
              state,
              len);
-    uart_send_text(msg);
+    app_debug_uart(msg);
     return 0;
   }
 
-  uart_send_text("MODBUS WRITE COIL BAD RESP\r\n");
+  app_debug_uart("MODBUS WRITE COIL BAD RESP\r\n");
   return -1;
 }
 
@@ -765,9 +757,9 @@ static int plc_read_float_holding(uint16_t raw_reg_addr, float *out_value)
   if (sel <= 0)
   {
     if (sel == 0)
-      uart_send_text("MODBUS READF SELECT TIMEOUT\r\n");
+      app_debug_uart("MODBUS READF SELECT TIMEOUT\r\n");
     else
-      uart_send_text("MODBUS READF SELECT ERROR\r\n");
+      app_debug_uart("MODBUS READF SELECT ERROR\r\n");
 
     (void)closesocket(sock);
     return -1;
@@ -887,20 +879,20 @@ static void telemetry_send_live_to_esp(void)
 {
   char msg[96];
 
-  uart_send_text("TEL:CACHED_ONLY\r\n");
+  app_debug_uart("TEL:CACHED_ONLY\r\n");
 
   (void)snprintf(msg, sizeof(msg),
                  "LIVE,0.00,0.00,%d,%d,0.00\r\n",
                  current_torque,
                  current_speed);
 
-  esp_send_text(msg);
+  app_uart_esp_send(msg);
 }
 
 static void plc_start(void)
 {
   modbus_command_active = 1U;
-  uart_send_text("PLC START veriliyor\r\n");
+  app_debug_uart("PLC START veriliyor\r\n");
   modbus_write_single_coil(COIL_EKRAN_START, 1);
   osDelay(100);
   modbus_write_single_coil(COIL_SISTEM_STARTLI, 1);
@@ -912,12 +904,12 @@ static void plc_stop(void)
   int sock;
 
   modbus_command_active = 1U;
-  uart_send_text("PLC STOP veriliyor\r\n");
+  app_debug_uart("PLC STOP veriliyor\r\n");
 
   sock = modbus_open_socket();
   if (sock < 0)
   {
-    uart_send_text("STOP FAIL -> SOCKET OPEN\r\n");
+    app_debug_uart("STOP FAIL -> SOCKET OPEN\r\n");
     modbus_command_release_guard();
     return;
   }
@@ -925,7 +917,7 @@ static void plc_stop(void)
   // 1) Önce hareketi durduracak bitleri kapat
   if (modbus_write_single_coil_on_socket(sock, COIL_EKRAN_START, 0) != 0)
   {
-    uart_send_text("STOP FAIL -> COIL START\r\n");
+    app_debug_uart("STOP FAIL -> COIL START\r\n");
     (void)closesocket(sock);
     modbus_command_release_guard();
     return;
@@ -934,7 +926,7 @@ static void plc_stop(void)
 
   if (modbus_write_single_coil_on_socket(sock, COIL_SISTEM_STARTLI, 0) != 0)
   {
-    uart_send_text("STOP FAIL -> COIL RUN\r\n");
+    app_debug_uart("STOP FAIL -> COIL RUN\r\n");
     (void)closesocket(sock);
     modbus_command_release_guard();
     return;
@@ -944,7 +936,7 @@ static void plc_stop(void)
   // 2) Sonra hız/tork komutlarını sıfırla
   if (modbus_write_single_register_on_socket(sock, HR_SERVO_HIZ_GIDEN, 0) != 0)
   {
-    uart_send_text("STOP FAIL -> REG HIZ_GIDEN\r\n");
+    app_debug_uart("STOP FAIL -> REG HIZ_GIDEN\r\n");
     (void)closesocket(sock);
     modbus_command_release_guard();
     return;
@@ -953,7 +945,7 @@ static void plc_stop(void)
 
   if (modbus_write_single_register_on_socket(sock, HR_SERVO_TORK_GIDEN, 0) != 0)
   {
-    uart_send_text("STOP FAIL -> REG TORK_GIDEN\r\n");
+    app_debug_uart("STOP FAIL -> REG TORK_GIDEN\r\n");
     (void)closesocket(sock);
     modbus_command_release_guard();
     return;
@@ -962,7 +954,7 @@ static void plc_stop(void)
 
   (void)closesocket(sock);
 
-  uart_send_text("PLC STOP komutlari tamamlandi\r\n");
+  app_debug_uart("PLC STOP komutlari tamamlandi\r\n");
   modbus_command_release_guard();
 }
 
@@ -972,7 +964,7 @@ static void plc_set_speed_torque(int16_t speed, uint16_t torque)
   char msg[128];
 
   snprintf(msg, sizeof(msg), "SET speed=%d torque=%u\r\n", speed, torque);
-  uart_send_text(msg);
+  app_debug_uart(msg);
 
   modbus_write_single_register(HR_SERVO_TORK, torque);
   osDelay(100);
@@ -986,16 +978,16 @@ static void plc_set_speed_torque(int16_t speed, uint16_t torque)
 
 void modbus_motion_test_once(void)
 {
-  uart_send_text("\r\n===== MOTION TEST BASLADI =====\r\n");
+  app_debug_uart("\r\n===== MOTION TEST BASLADI =====\r\n");
 
-  uart_send_text("BASLANGIC TEMIZLIK\r\n");
+  app_debug_uart("BASLANGIC TEMIZLIK\r\n");
   plc_stop();
   osDelay(1500);
 
   plc_start();
   osDelay(500);
 
-  uart_send_text("GERI/SARMA TEST: 5+ saniye\r\n");
+  app_debug_uart("GERI/SARMA TEST: 5+ saniye\r\n");
 
   /*
     Su an sistemde calisan yon bu.
@@ -1004,10 +996,10 @@ void modbus_motion_test_once(void)
   plc_set_speed_torque(1000, 100);
   osDelay(7000);
 
-  uart_send_text("FINAL STOP\r\n");
+  app_debug_uart("FINAL STOP\r\n");
   plc_stop();
 
-  uart_send_text("===== MOTION TEST BITTI =====\r\n\r\n");
+  app_debug_uart("===== MOTION TEST BITTI =====\r\n\r\n");
 }
 
 static void plc_rewind_from_esp(void)
@@ -1019,7 +1011,7 @@ static void plc_rewind_from_esp(void)
 
 void plc_reset_meter(void)
 {
-  uart_send_text("PLC: METRE SIFIRLAMA\r\n");
+  app_debug_uart("PLC: METRE SIFIRLAMA\r\n");
   modbus_write_single_coil(COIL_METRE_SIFIRLAMA, 1);
   osDelay(200);
   modbus_write_single_coil(COIL_METRE_SIFIRLAMA, 0);
@@ -1036,7 +1028,7 @@ void plc_set_fixed_speed_torque_distance(uint16_t fixed_speed, uint16_t fixed_to
 
   snprintf(msg, sizeof(msg), "PLC: FIXED hiz=%u tork=%u mesafe=%u\r\n",
            (unsigned int)fixed_speed, (unsigned int)fixed_torque, (unsigned int)distance);
-  uart_send_text(msg);
+  app_debug_uart(msg);
 
   modbus_write_single_register(HR_EKRAN_SERVO_SABIT_HIZ, fixed_speed);
   osDelay(80);
@@ -1055,19 +1047,19 @@ void plc_start_fixed_mode_from_esp(void)
   current_torque = 5;
   current_speed = 100;
 
-  uart_send_text("\r\nESP KOMUT GELDI -> START\r\n");
+  app_debug_uart("\r\nESP KOMUT GELDI -> START\r\n");
 
   sock = modbus_open_socket();
   if (sock < 0)
   {
-    uart_send_text("START FAIL -> SOCKET OPEN\r\n");
+    app_debug_uart("START FAIL -> SOCKET OPEN\r\n");
     modbus_command_release_guard();
     return;
   }
 
   if (modbus_write_single_register_on_socket(sock, HR_EKRAN_SERVO_SABIT_HIZ, 100) != 0)
   {
-    uart_send_text("START FAIL -> REG 312\r\n");
+    app_debug_uart("START FAIL -> REG 312\r\n");
     (void)closesocket(sock);
     modbus_command_release_guard();
     return;
@@ -1076,7 +1068,7 @@ void plc_start_fixed_mode_from_esp(void)
 
   if (modbus_write_single_register_on_socket(sock, HR_EKRAN_SERVO_SABIT_TORK, current_torque) != 0)
   {
-    uart_send_text("START FAIL -> REG 313\r\n");
+    app_debug_uart("START FAIL -> REG 313\r\n");
     (void)closesocket(sock);
     modbus_command_release_guard();
     return;
@@ -1085,7 +1077,7 @@ void plc_start_fixed_mode_from_esp(void)
 
   if (modbus_write_single_coil_on_socket(sock, COIL_EKRAN_START, 1) != 0)
   {
-    uart_send_text("START FAIL -> COIL START\r\n");
+    app_debug_uart("START FAIL -> COIL START\r\n");
     (void)closesocket(sock);
     modbus_command_release_guard();
     return;
@@ -1094,7 +1086,7 @@ void plc_start_fixed_mode_from_esp(void)
 
   if (modbus_write_single_coil_on_socket(sock, COIL_SISTEM_STARTLI, 1) != 0)
   {
-    uart_send_text("START FAIL -> COIL RUN\r\n");
+    app_debug_uart("START FAIL -> COIL RUN\r\n");
     (void)closesocket(sock);
     modbus_command_release_guard();
     return;
@@ -1103,7 +1095,7 @@ void plc_start_fixed_mode_from_esp(void)
 
   (void)closesocket(sock);
 
-  uart_send_text("PLC START DONE\r\n");
+  app_debug_uart("PLC START DONE\r\n");
   plc_running = 1;
   modbus_command_release_guard();
 }
@@ -1111,10 +1103,10 @@ void plc_start_fixed_mode_from_esp(void)
 void plc_stop_from_esp(void)
 {
   plc_running = 0;
-  uart_send_text("\r\nESP KOMUT GELDI -> STOP\r\n");
+  app_debug_uart("\r\nESP KOMUT GELDI -> STOP\r\n");
   plc_busy = 0;
   plc_stop();
-  uart_send_text("PLC: STOP DONE\r\n");
+  app_debug_uart("PLC: STOP DONE\r\n");
 }
 
 static void modbus_command_worker_run(void)
@@ -1147,7 +1139,7 @@ static void modbus_command_worker_run(void)
       {
         pending_staged_speed_guard = 0U;
         modbus_command_guard_until_ms = osKernelGetTickCount() + STAGED_COMMAND_GUARD_MS;
-        uart_send_text("STAGED SPEED GUARD 5000ms\r\n");
+        app_debug_uart("STAGED SPEED GUARD 5000ms\r\n");
       }
       break;
 
@@ -1176,12 +1168,12 @@ static void esp_check_uart_command(void)
   snprintf(dbg, sizeof(dbg), "UART2 BYTE: 0x%02X '%c'\r\n",
            (unsigned int)esp_rx_byte,
            (esp_rx_byte >= 32 && esp_rx_byte <= 126) ? (char)esp_rx_byte : '.');
-  uart_send_text(dbg);
+  app_debug_uart(dbg);
 #endif
 
   if (esp_rx_byte == 'S')
   {
-    uart_send_text("\r\nUART CMD -> S / STOP\r\n");
+    app_debug_uart("\r\nUART CMD -> S / STOP\r\n");
     plc_busy = 0;
     pending_cmd = MB_CMD_STOP;
 
@@ -1195,7 +1187,7 @@ static void esp_check_uart_command(void)
     uint32_t now_ms = osKernelGetTickCount();
     if ((now_ms - live_setpoint_last_ms) < 250U)
     {
-      uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+      app_debug_uart("LIVE SETPOINT COOLDOWN\r\n");
       return;
     }
     live_setpoint_last_ms = now_ms;
@@ -1205,7 +1197,7 @@ static void esp_check_uart_command(void)
     if (current_torque > 50)
       current_torque = 50;
 
-    uart_send_text("TORQUE PLUS\r\n");
+    app_debug_uart("TORQUE PLUS\r\n");
 
     pending_torque = current_torque;
     pending_cmd = MB_CMD_TORQUE_SET;
@@ -1218,7 +1210,7 @@ static void esp_check_uart_command(void)
     uint32_t now_ms = osKernelGetTickCount();
     if ((now_ms - live_setpoint_last_ms) < 250U)
     {
-      uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+      app_debug_uart("LIVE SETPOINT COOLDOWN\r\n");
       return;
     }
     live_setpoint_last_ms = now_ms;
@@ -1228,7 +1220,7 @@ static void esp_check_uart_command(void)
     if (current_torque < 0)
       current_torque = 0;
 
-    uart_send_text("TORQUE MINUS\r\n");
+    app_debug_uart("TORQUE MINUS\r\n");
 
     pending_torque = current_torque;
     pending_cmd = MB_CMD_TORQUE_SET;
@@ -1241,7 +1233,7 @@ static void esp_check_uart_command(void)
     uint32_t now_ms = osKernelGetTickCount();
     if ((now_ms - live_setpoint_last_ms) < 250U)
     {
-      uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+      app_debug_uart("LIVE SETPOINT COOLDOWN\r\n");
       return;
     }
     live_setpoint_last_ms = now_ms;
@@ -1251,7 +1243,7 @@ static void esp_check_uart_command(void)
     if (current_speed > 2000)
       current_speed = 2000;
 
-    uart_send_text("SPEED PLUS\r\n");
+    app_debug_uart("SPEED PLUS\r\n");
 
     pending_speed = current_speed;
     pending_cmd = MB_CMD_SPEED_SET;
@@ -1264,7 +1256,7 @@ static void esp_check_uart_command(void)
     uint32_t now_ms = osKernelGetTickCount();
     if ((now_ms - live_setpoint_last_ms) < 250U)
     {
-      uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+      app_debug_uart("LIVE SETPOINT COOLDOWN\r\n");
       return;
     }
     live_setpoint_last_ms = now_ms;
@@ -1274,7 +1266,7 @@ static void esp_check_uart_command(void)
     if (current_speed < 0)
       current_speed = 0;
 
-    uart_send_text("SPEED MINUS\r\n");
+    app_debug_uart("SPEED MINUS\r\n");
 
     pending_speed = current_speed;
     pending_cmd = MB_CMD_SPEED_SET;
@@ -1289,7 +1281,7 @@ static void esp_check_uart_command(void)
     uint32_t now_ms = osKernelGetTickCount();
     if ((now_ms - live_setpoint_last_ms) < 250U)
     {
-      uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+      app_debug_uart("LIVE SETPOINT COOLDOWN\r\n");
       return;
     }
     live_setpoint_last_ms = now_ms;
@@ -1299,7 +1291,7 @@ static void esp_check_uart_command(void)
 
     char msg[64];
     snprintf(msg, sizeof(msg), "UART CMD -> STAGE SPEED %d\r\n", new_speed);
-    uart_send_text(msg);
+    app_debug_uart(msg);
 
     pending_speed = current_speed;
     pending_staged_speed_guard = 1U;
@@ -1314,7 +1306,7 @@ static void esp_check_uart_command(void)
     uint32_t now_ms = osKernelGetTickCount();
     if ((now_ms - live_setpoint_last_ms) < 250U)
     {
-      uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+      app_debug_uart("LIVE SETPOINT COOLDOWN\r\n");
       return;
     }
     live_setpoint_last_ms = now_ms;
@@ -1330,7 +1322,7 @@ static void esp_check_uart_command(void)
 
     char msg[64];
     snprintf(msg, sizeof(msg), "UART CMD -> STAGE TORQUE %d\r\n", tq);
-    uart_send_text(msg);
+    app_debug_uart(msg);
 
     pending_torque = current_torque;
     pending_cmd = MB_CMD_TORQUE_SET;
@@ -1344,17 +1336,17 @@ static void esp_check_uart_command(void)
 
     if ((now_ms - esp_last_start_ms) < 1000U)
     {
-      uart_send_text("START IGNORED - COOLDOWN\r\n");
+      app_debug_uart("START IGNORED - COOLDOWN\r\n");
       return;
     }
 
     if (plc_busy)
     {
-      uart_send_text("PLC BUSY - START IGNORED\r\n");
+      app_debug_uart("PLC BUSY - START IGNORED\r\n");
       return;
     }
 
-    uart_send_text("\r\nUART CMD -> R / START\r\n");
+    app_debug_uart("\r\nUART CMD -> R / START\r\n");
     esp_last_start_ms = now_ms;
 
     plc_busy = 1;
@@ -1387,7 +1379,7 @@ static void esp_check_uart_command(void)
       uint32_t now_ms = osKernelGetTickCount();
       if ((now_ms - live_setpoint_last_ms) < 250U)
       {
-        uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+        app_debug_uart("LIVE SETPOINT COOLDOWN\r\n");
       }
       else
       {
@@ -1395,7 +1387,7 @@ static void esp_check_uart_command(void)
         live_setpoint_last_ms = now_ms;
         current_speed = v;
         snprintf(msg, sizeof(msg), "UART CMD -> V:%d\r\n", v);
-        uart_send_text(msg);
+        app_debug_uart(msg);
         pending_speed = current_speed;
         pending_cmd = MB_CMD_SPEED_SET;
       }
@@ -1409,7 +1401,7 @@ static void esp_check_uart_command(void)
       uint32_t now_ms = osKernelGetTickCount();
       if ((now_ms - live_setpoint_last_ms) < 250U)
       {
-        uart_send_text("LIVE SETPOINT COOLDOWN\r\n");
+        app_debug_uart("LIVE SETPOINT COOLDOWN\r\n");
       }
       else
       {
@@ -1417,14 +1409,14 @@ static void esp_check_uart_command(void)
         live_setpoint_last_ms = now_ms;
         current_torque = v;
         snprintf(msg, sizeof(msg), "UART CMD -> Q:%d\r\n", v);
-        uart_send_text(msg);
+        app_debug_uart(msg);
         pending_torque = current_torque;
         pending_cmd = MB_CMD_TORQUE_SET;
       }
     }
     else
     {
-      uart_send_text("UART LINE IGNORED\r\n");
+      app_debug_uart("UART LINE IGNORED\r\n");
     }
 
     memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
@@ -1440,7 +1432,7 @@ static void esp_check_uart_command(void)
   }
 
   /* Overflow: reset buffer to avoid stale parse. */
-  uart_send_text("UART LINE OVERFLOW\r\n");
+  app_debug_uart("UART LINE OVERFLOW\r\n");
   memset(esp_cmd_buffer, 0, sizeof(esp_cmd_buffer));
   esp_cmd_index = 0;
 }
@@ -1489,16 +1481,16 @@ int modbus_read_all_registers(void)
     uint16_t r40006 = ((uint16_t)response[19] << 8) | response[20];
     uint16_t r40007 = ((uint16_t)response[21] << 8) | response[22];
 
-    uart_send_text("\r\n===== PLC MODBUS READ =====\r\n");
-    snprintf(msg, sizeof(msg), "40001 SERVO_HIZ        : %u\r\n", r40001); uart_send_text(msg);
-    snprintf(msg, sizeof(msg), "40002 Servo_hiz_gelen  : %u\r\n", r40002); uart_send_text(msg);
-    snprintf(msg, sizeof(msg), "40003 Servo_hiz_giden  : %u\r\n", r40003); uart_send_text(msg);
-    snprintf(msg, sizeof(msg), "40004 SERVO_TORKU      : %u\r\n", r40004); uart_send_text(msg);
-    snprintf(msg, sizeof(msg), "40005 Servo_tork_gelen : %u\r\n", r40005); uart_send_text(msg);
-    snprintf(msg, sizeof(msg), "40006 Servo_tork_giden : %u\r\n", r40006); uart_send_text(msg);
-    snprintf(msg, sizeof(msg), "40007 Servo_mevcut_hiz : %u\r\n", r40007); uart_send_text(msg);
+    app_debug_uart("\r\n===== PLC MODBUS READ =====\r\n");
+    snprintf(msg, sizeof(msg), "40001 SERVO_HIZ        : %u\r\n", r40001); app_debug_uart(msg);
+    snprintf(msg, sizeof(msg), "40002 Servo_hiz_gelen  : %u\r\n", r40002); app_debug_uart(msg);
+    snprintf(msg, sizeof(msg), "40003 Servo_hiz_giden  : %u\r\n", r40003); app_debug_uart(msg);
+    snprintf(msg, sizeof(msg), "40004 SERVO_TORKU      : %u\r\n", r40004); app_debug_uart(msg);
+    snprintf(msg, sizeof(msg), "40005 Servo_tork_gelen : %u\r\n", r40005); app_debug_uart(msg);
+    snprintf(msg, sizeof(msg), "40006 Servo_tork_giden : %u\r\n", r40006); app_debug_uart(msg);
+    snprintf(msg, sizeof(msg), "40007 Servo_mevcut_hiz : %u\r\n", r40007); app_debug_uart(msg);
 
-    uart_send_text("===========================\r\n");
+    app_debug_uart("===========================\r\n");
     (void)closesocket(sock);
     return 0;
   }
@@ -1667,7 +1659,7 @@ void plc_diagnostic_read_all(void)
   };
 
   char msg[192];
-  uart_send_text("\r\n===== PLC DIAGNOSTIC READ (TEMP) =====\r\n");
+  app_debug_uart("\r\n===== PLC DIAGNOSTIC READ (TEMP) =====\r\n");
 
   for (uint32_t i = 0; i < (uint32_t)(sizeof(hrs) / sizeof(hrs[0])); i++)
   {
@@ -1689,10 +1681,10 @@ void plc_diagnostic_read_all(void)
                (unsigned int)raw,
                hrs[i].name);
     }
-    uart_send_text(msg);
+    app_debug_uart(msg);
   }
 
-  uart_send_text("----- COILS -----\r\n");
+  app_debug_uart("----- COILS -----\r\n");
 
   for (uint32_t i = 0; i < (uint32_t)(sizeof(coils) / sizeof(coils[0])); i++)
   {
@@ -1714,10 +1706,10 @@ void plc_diagnostic_read_all(void)
                (unsigned int)raw,
                coils[i].name);
     }
-    uart_send_text(msg);
+    app_debug_uart(msg);
   }
 
-  uart_send_text("======================================\r\n");
+  app_debug_uart("======================================\r\n");
 }
 
 /* USER CODE END 0 */
@@ -1765,8 +1757,8 @@ int main(void)
   MX_USART2_UART_Init();
 
   /* USER CODE BEGIN 2 */
-  uart_send_text("\r\n\r\nSTM32 guc verdi\r\n");
-  uart_send_text("USART2 ESP KOMUT HATTI HAZIR\r\n");
+  app_debug_uart("\r\n\r\nSTM32 guc verdi\r\n");
+  app_debug_uart("USART2 ESP KOMUT HATTI HAZIR\r\n");
   /* USER CODE END 2 */
 
   osKernelInitialize();
@@ -1775,11 +1767,11 @@ int main(void)
 
   if (defaultTaskHandle == NULL)
   {
-    uart_send_text("TASK CREATE FAIL\r\n");
+    app_debug_uart("TASK CREATE FAIL\r\n");
   }
   else
   {
-    uart_send_text("TASK CREATE OK\r\n");
+    app_debug_uart("TASK CREATE OK\r\n");
   }
 
   osKernelStart();
@@ -1906,19 +1898,19 @@ void StartDefaultTask(void *argument)
   uint8_t link_now = 0;
   uint8_t link_prev = 0xFF;
 
-  uart_send_text("TASK BASLADI\r\n");
-  uart_send_text("LWIP init giriyor\r\n");
+  app_debug_uart("TASK BASLADI\r\n");
+  app_debug_uart("LWIP init giriyor\r\n");
 
   MX_LWIP_Init();
 
-  uart_send_text("LWIP init cikti\r\n");
-  uart_send_text("LWIP init tamam\r\n");
+  app_debug_uart("LWIP init cikti\r\n");
+  app_debug_uart("LWIP init tamam\r\n");
 
   snprintf(msg, sizeof(msg),
            "STM MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
            gnetif.hwaddr[0], gnetif.hwaddr[1], gnetif.hwaddr[2],
            gnetif.hwaddr[3], gnetif.hwaddr[4], gnetif.hwaddr[5]);
-  uart_send_text(msg);
+  app_debug_uart(msg);
 
   osDelay(3000);
 
@@ -1943,7 +1935,7 @@ void StartDefaultTask(void *argument)
     /* PHY/link checks */
     if (HAL_ETH_ReadPHYRegister(&heth, 0, 0x01, &phy_bsr) != HAL_OK)
     {
-      uart_send_text("PHY reg read hata\r\n");
+      app_debug_uart("PHY reg read hata\r\n");
     }
 
     link_now = (phy_bsr & (1 << 2)) ? 1 : 0;
@@ -1951,9 +1943,9 @@ void StartDefaultTask(void *argument)
     if (link_now != link_prev)
     {
       if (link_now)
-        uart_send_text("LINK DEGISTI -> UP\r\n");
+        app_debug_uart("LINK DEGISTI -> UP\r\n");
       else
-        uart_send_text("LINK DEGISTI -> DOWN\r\n");
+        app_debug_uart("LINK DEGISTI -> DOWN\r\n");
 
       link_prev = link_now;
     }
@@ -1965,35 +1957,35 @@ void StartDefaultTask(void *argument)
       last_verbose_ms = now;
 
       snprintf(msg, sizeof(msg), "PHY BSR (0x01): 0x%04lX\r\n", phy_bsr);
-      uart_send_text(msg);
+      app_debug_uart(msg);
 
       if (link_now)
-        uart_send_text("BSR link bit: 1\r\n");
+        app_debug_uart("BSR link bit: 1\r\n");
       else
-        uart_send_text("BSR link bit: 0\r\n");
+        app_debug_uart("BSR link bit: 0\r\n");
 
       if (netif_is_link_up(&gnetif))
-        uart_send_text("ETH LINK UP\r\n");
+        app_debug_uart("ETH LINK UP\r\n");
       else
-        uart_send_text("ETH LINK DOWN\r\n");
+        app_debug_uart("ETH LINK DOWN\r\n");
 
       if (netif_is_up(&gnetif))
-        uart_send_text("NETIF UP\r\n");
+        app_debug_uart("NETIF UP\r\n");
       else
-        uart_send_text("NETIF DOWN\r\n");
+        app_debug_uart("NETIF DOWN\r\n");
 
       snprintf(msg, sizeof(msg), "RX IRQ: %lu  TX IRQ: %lu  ERR IRQ: %lu\r\n",
                eth_rx_irq_count, eth_tx_irq_count, eth_err_irq_count);
-      uart_send_text(msg);
+      app_debug_uart(msg);
 
       snprintf(msg, sizeof(msg), "PBUF: %lu  INPUT_OK: %lu  INPUT_FAIL: %lu\r\n",
                eth_pbuf_count, eth_input_ok_count, eth_input_fail_count);
-      uart_send_text(msg);
+      app_debug_uart(msg);
 
       snprintf(msg, sizeof(msg), "IP: %s\r\n", ip4addr_ntoa(netif_ip4_addr(&gnetif)));
-      uart_send_text(msg);
+      app_debug_uart(msg);
 
-      uart_send_text("---------------------\r\n");
+      app_debug_uart("---------------------\r\n");
     }
 
     /* Periodic Modbus reads disabled for stability (no diagnostic/read-all calls). */
@@ -2032,7 +2024,7 @@ void StartDefaultTask(void *argument)
                (unsigned int)pen,
                (unsigned long)guard_left,
                (unsigned long)now);
-      uart_send_text(msg);
+      app_debug_uart(msg);
     }
 
     if (telemetry_skip_once)
@@ -2040,20 +2032,20 @@ void StartDefaultTask(void *argument)
       if ((now - dbg_tel_reason_ms) >= 2000U)
       {
         dbg_tel_reason_ms = now;
-        uart_send_text("DBG:TEL:SKIP_ONCE\r\n");
+        app_debug_uart("DBG:TEL:SKIP_ONCE\r\n");
       }
       telemetry_skip_once = 0U;
     }
     else if ((pending_cmd == MB_CMD_NONE) &&
              plc_running &&
              (modbus_command_active == 0U) &&
-             ((now - last_meter_ms) >= 500U) &&
+             ((now - last_meter_ms) >= 2000U) &&
              ((int32_t)(now - modbus_command_guard_until_ms) >= 0))
     {
-      uart_send_text("DBG:TEL:CALL\r\n");
+      app_debug_uart("DBG:TEL:CALL\r\n");
       last_meter_ms = now;
       telemetry_send_live_to_esp();
-      uart_send_text("DBG:TEL:DONE\r\n");
+      app_debug_uart("DBG:TEL:DONE\r\n");
     }
     else
     {
@@ -2062,23 +2054,23 @@ void StartDefaultTask(void *argument)
         dbg_tel_reason_ms = now;
         if (plc_running == 0U)
         {
-          uart_send_text("DBG:TEL:NOT_RUNNING\r\n");
+          app_debug_uart("DBG:TEL:NOT_RUNNING\r\n");
         }
         else if (pending_cmd != MB_CMD_NONE)
         {
-          uart_send_text("DBG:TEL:PENDING\r\n");
+          app_debug_uart("DBG:TEL:PENDING\r\n");
         }
         else if (modbus_command_active != 0U)
         {
-          uart_send_text("DBG:TEL:ACTIVE\r\n");
+          app_debug_uart("DBG:TEL:ACTIVE\r\n");
         }
         else if ((int32_t)(now - modbus_command_guard_until_ms) < 0)
         {
-          uart_send_text("DBG:TEL:GUARD\r\n");
+          app_debug_uart("DBG:TEL:GUARD\r\n");
         }
-        else if ((now - last_meter_ms) < 500U)
+        else if ((now - last_meter_ms) < 2000U)
         {
-          uart_send_text("DBG:TEL:INTERVAL\r\n");
+          app_debug_uart("DBG:TEL:INTERVAL\r\n");
         }
       }
     }

@@ -79,7 +79,9 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../../Middlewares/Third_Party/LwIP/src/include/lwip/errno.h \
  ../../Middlewares/Third_Party/LwIP/src/include/lwip/sockets.h \
  ../../Middlewares/Third_Party/LwIP/src/include/lwip/inet.h \
- ../../Middlewares/Third_Party/LwIP/src/include/lwip/errno.h
+ ../../Middlewares/Third_Party/LwIP/src/include/lwip/errno.h \
+ C:/Users/abdullah/Documents/stm_uart_test/STM32_UART_Test/CM7/Core/Inc/App/app_debug.h \
+ C:/Users/abdullah/Documents/stm_uart_test/STM32_UART_Test/CM7/Core/Inc/App/app_uart_esp.h
 ../Core/Inc/main.h:
 ../../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
@@ -163,3 +165,5 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../../Middlewares/Third_Party/LwIP/src/include/lwip/sockets.h:
 ../../Middlewares/Third_Party/LwIP/src/include/lwip/inet.h:
 ../../Middlewares/Third_Party/LwIP/src/include/lwip/errno.h:
+C:/Users/abdullah/Documents/stm_uart_test/STM32_UART_Test/CM7/Core/Inc/App/app_debug.h:
+C:/Users/abdullah/Documents/stm_uart_test/STM32_UART_Test/CM7/Core/Inc/App/app_uart_esp.h:
